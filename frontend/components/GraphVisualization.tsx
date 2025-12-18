@@ -1,6 +1,6 @@
 'use client'
 
-import { useRef, useEffect, useState, useMemo } from 'react'
+import { useMemo, useRef } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { OrbitControls, Text } from '@react-three/drei'
 import * as THREE from 'three'
@@ -54,148 +54,41 @@ function BillboardText({ children, position, fontSize, ...props }: any) {
 
 function GraphNode3D({ 
   node, 
-  position, 
-  onNodeClick,
-  onNodePageClick,
-  isHighlighted,
-  onHover,
-  onNodeSelect,
-  onDragStart,
-  onDragEnd,
-  showLabel,
-  onPointerDownCapture,
-  isDragged,
-  isDraggingGlobal
+  position,
+  isFirstDegree
 }: { 
   node: GraphNode
   position: [number, number, number]
-  onNodeClick: (position: [number, number, number]) => void
-  onNodePageClick?: (pageId: number) => void
-  isHighlighted?: boolean
-  onHover?: (pageId: number | null) => void
-  onNodeSelect?: (pageId: number) => void
-  onDragStart?: (pageId: number) => void
-  onDragEnd?: (pageId: number) => void
-  showLabel?: boolean
-  onPointerDownCapture?: (pageId: number) => void
-  isDragged?: boolean
-  isDraggingGlobal?: boolean
+  isFirstDegree?: boolean
 }) {
-  const meshRef = useRef<THREE.Mesh>(null)
-  const [hovered, setHovered] = useState(false)
-  const [isDragging, setIsDragging] = useState(false)
-  const hasDraggedRef = useRef(false)
-  const pointerDownPosRef = useRef<{ x: number; y: number } | null>(null)
-  
-  // Use global dragging state if provided, otherwise use local
-  const isDraggingActive = isDraggingGlobal ?? isDragging
-  
   // Size based on degree (log scale for better visualization)
   const totalDegree = node.out_degree + node.in_degree
   const size = Math.max(0.15, Math.min(1.2, Math.log10(totalDegree + 1) / 2.5))
   
-  // Color: center node always stays red, hovered/dragged node is light yellow, others change when highlighted
-  // Highlight if hovered or isHighlighted
-  const isHighlightedNode = hovered || isHighlighted
+  // Color: center node is red, 1st degree nodes are purple (lighter if more incoming links), others based on degree
   const color = node.is_center
     ? '#ff6b6b' // Center node always red
-    : (hovered || isDragged)
-      ? '#fef08a' // Hovered or dragged node is light yellow
-      : isHighlightedNode
-        ? '#ffffff' // Highlighted nodes are white
-        : node.in_degree > node.out_degree 
-          ? '#4ecdc4' 
-          : '#95e1d3'
-  
-  // Note: isDraggingActive is used to prevent hover updates, but color uses hovered/isDragged
+    : isFirstDegree
+      ? (node.in_degree > node.out_degree 
+          ? '#a78bfa' // 1st degree nodes with more incoming: very light purple
+          : '#6b46c1') // 1st degree nodes: dark purple
+      : node.in_degree > node.out_degree 
+        ? '#4ecdc4' 
+        : '#95e1d3'
 
   return (
     <group position={position}>
-      <mesh 
-        ref={meshRef}
-        onPointerOver={() => {
-          // Don't update hover state if we're dragging - keep it locked
-          if (!isDraggingActive) {
-            setHovered(true)
-            if (onHover) onHover(node.page_id)
-          }
-        }}
-        onPointerOut={() => {
-          // Don't update hover state if we're dragging - keep it locked
-          if (!isDraggingActive) {
-            setHovered(false)
-            if (onHover) {
-              onHover(null)
-            }
-          }
-        }}
-        onPointerDown={(e) => {
-          e.stopPropagation() // Prevent canvas click from firing
-          setIsDragging(false)
-          hasDraggedRef.current = false
-          // Capture pointer position to detect drag
-          pointerDownPosRef.current = { x: e.clientX, y: e.clientY }
-          // Capture the currently hovered node when pointer goes down
-          // This happens before click, so we can use it in the click handler
-          if (onPointerDownCapture) {
-            onPointerDownCapture(node.page_id)
-          }
-          // Notify parent that this node is being dragged
-          if (onDragStart) {
-            onDragStart(node.page_id)
-          }
-        }}
-        onPointerMove={(e) => {
-          // Detect if we're actually dragging (pointer moved significantly)
-          if (pointerDownPosRef.current && !hasDraggedRef.current) {
-            const dx = e.clientX - pointerDownPosRef.current.x
-            const dy = e.clientY - pointerDownPosRef.current.y
-            const distance = Math.sqrt(dx * dx + dy * dy)
-            // If moved more than 5 pixels, consider it a drag
-            if (distance > 5) {
-              hasDraggedRef.current = true
-            }
-          }
-        }}
-        onPointerUp={(e) => {
-          e.stopPropagation()
-          setIsDragging(false)
-          pointerDownPosRef.current = null
-          if (onDragEnd) {
-            onDragEnd(node.page_id)
-          }
-        }}
-        onClick={(e) => {
-          e.stopPropagation()
-          // Only handle click if we didn't drag
-          if (!hasDraggedRef.current) {
-            // Single click - persist the current hover highlights
-            // Use the ref value (which should still have the hovered node) or the clicked node
-            if (onNodeSelect) {
-              // The ref should still have the value from when we were hovering
-              // If not, use the clicked node itself
-              onNodeSelect(node.page_id)
-            }
-          }
-          // Reset drag flag after click
-          hasDraggedRef.current = false
-        }}
-        onDoubleClick={(e) => {
-          e.stopPropagation()
-          // Double click - switch view to this node
-          if (onNodePageClick && !hasDraggedRef.current) {
-            onNodePageClick(node.page_id)
-          }
-        }}
-      >
-        <sphereGeometry args={[size, 16, 16]} />
+      <mesh castShadow receiveShadow>
+        <sphereGeometry args={[size, 32, 32]} />
         <meshStandardMaterial 
           color={color} 
           emissive={color} 
-          emissiveIntensity={isHighlightedNode ? 0.6 : 0.2}
+          emissiveIntensity={0.15}
+          roughness={0.4}
+          metalness={0.1}
         />
       </mesh>
-      {(node.is_center || hovered || showLabel || isDragged) && (
+      {node.is_center && (
         <BillboardText
           position={[0, size + 0.3, 0]}
           fontSize={1.0}
@@ -281,155 +174,8 @@ function calculateNodePositions(
   return positions
 }
 
-// Component to track drag state on the canvas
-function DragTracker({ onDragStart, onDragEnd }: { onDragStart: () => void; onDragEnd: () => void }) {
-  const { gl } = useThree()
-  const isDraggingRef = useRef(false)
-  
-  useEffect(() => {
-    const canvas = gl.domElement
-    
-    const handlePointerDown = (e: PointerEvent) => {
-      // Only track if it's not a click on a node (which would be handled by the node itself)
-      if (e.button === 0) { // Left mouse button
-        isDraggingRef.current = true
-        onDragStart()
-      }
-    }
-    
-    const handlePointerMove = () => {
-      if (isDraggingRef.current) {
-        // Already started, keep it going
-      }
-    }
-    
-    const handlePointerUp = () => {
-      if (isDraggingRef.current) {
-        isDraggingRef.current = false
-        onDragEnd()
-      }
-    }
-    
-    // Use capture phase to catch events before they reach nodes
-    canvas.addEventListener('pointerdown', handlePointerDown, true)
-    canvas.addEventListener('pointermove', handlePointerMove, true)
-    canvas.addEventListener('pointerup', handlePointerUp, true)
-    canvas.addEventListener('pointercancel', handlePointerUp, true)
-    
-    return () => {
-      canvas.removeEventListener('pointerdown', handlePointerDown, true)
-      canvas.removeEventListener('pointermove', handlePointerMove, true)
-      canvas.removeEventListener('pointerup', handlePointerUp, true)
-      canvas.removeEventListener('pointercancel', handlePointerUp, true)
-    }
-  }, [gl, onDragStart, onDragEnd])
-  
-  return null
-}
-
-// Camera animator - animates camera to center on clicked node
-function CameraAnimator({ 
-  targetPosition
-}: { 
-  targetPosition: [number, number, number]
-}) {
-  const { camera } = useThree()
-  const startPosRef = useRef<THREE.Vector3 | null>(null)
-  const startTargetRef = useRef<THREE.Vector3 | null>(null)
-  const endTargetRef = useRef<THREE.Vector3 | null>(null)
-  const endPosRef = useRef<THREE.Vector3 | null>(null)
-  const startTimeRef = useRef<number>(0)
-  const controlsRef = useRef<any>(null)
-  const isCompleteRef = useRef(false)
-  
-  useEffect(() => {
-    isCompleteRef.current = false
-    const [x, y, z] = targetPosition
-    const endTarget = new THREE.Vector3(x, y, z)
-    
-    startPosRef.current = camera.position.clone()
-    endTargetRef.current = endTarget
-    
-    // Find OrbitControls from the canvas
-    const canvas = document.querySelector('canvas')
-    if (canvas) {
-      const r3f = (canvas as any).__r3f
-      if (r3f?.root) {
-        const state = r3f.root.getState()
-        if (state.controls) {
-          controlsRef.current = state.controls
-          startTargetRef.current = state.controls.target.clone()
-        }
-      }
-    }
-    
-    if (!startTargetRef.current) {
-      startTargetRef.current = new THREE.Vector3(0, 0, 0)
-    }
-    
-    // Calculate desired camera position - maintain same distance
-    const currentTarget = startTargetRef.current
-    const currentDistance = camera.position.distanceTo(currentTarget)
-    
-    // Direction from current target to camera
-    const direction = new THREE.Vector3()
-      .subVectors(camera.position, currentTarget)
-      .normalize()
-    
-    // If direction is invalid, use default
-    if (direction.length() < 0.1) {
-      direction.set(0, 0, 1)
-    }
-    
-    // New camera position maintains same distance from new target
-    endPosRef.current = endTarget.clone().add(direction.multiplyScalar(currentDistance))
-    
-    startTimeRef.current = Date.now()
-  }, [targetPosition, camera])
-  
-  useFrame(() => {
-    if (isCompleteRef.current) return
-    if (!startPosRef.current || !endPosRef.current || !endTargetRef.current) return
-    if (!controlsRef.current) return
-    
-    const elapsed = Date.now() - startTimeRef.current
-    const duration = 800
-    const progress = Math.min(elapsed / duration, 1)
-    
-    // Easing function (ease-in-out cubic)
-    const eased = progress < 0.5
-      ? 4 * progress * progress * progress
-      : 1 - Math.pow(-2 * progress + 2, 3) / 2
-    
-    // Animate camera position
-    camera.position.lerpVectors(startPosRef.current!, endPosRef.current!, eased)
-    
-    // Animate controls target
-    controlsRef.current.target.lerpVectors(startTargetRef.current!, endTargetRef.current!, eased)
-    controlsRef.current.update()
-    
-    if (progress >= 1) {
-      isCompleteRef.current = true
-    }
-  })
-  
-  return null
-}
-
 export default function GraphVisualization({ data, onNodeClick }: GraphVisualizationProps) {
   const { nodes, edges } = data
-  const [targetPosition, setTargetPosition] = useState<[number, number, number] | null>(null)
-  const [isAnimating, setIsAnimating] = useState(false)
-  const [hoveredNodeId, setHoveredNodeId] = useState<number | null>(null)
-  const [isDragging, setIsDragging] = useState(false)
-  const [lockedHoveredNodeId, setLockedHoveredNodeId] = useState<number | null>(null)
-  const [selectedNodeId, setSelectedNodeId] = useState<number | null>(null)
-  // Use ref to track hovered node so it doesn't get lost when pointer out fires before click
-  const hoveredNodeIdRef = useRef<number | null>(null)
-  // Capture hovered node on pointer down (like we do for drag)
-  const clickedHoveredNodeIdRef = useRef<number | null>(null)
-  // Track which node is being dragged (clicked and held)
-  const [draggedNodeId, setDraggedNodeId] = useState<number | null>(null)
   
   // Calculate node positions using force-directed layout
   const nodePositions = useMemo(() => {
@@ -445,68 +191,60 @@ export default function GraphVisualization({ data, onNodeClick }: GraphVisualiza
     return positions
   }, [nodes, edges, data.center_page_id])
 
-  const handleNodeClick = (position: [number, number, number]) => {
-    setTargetPosition(position)
-    setIsAnimating(true)
-    setTimeout(() => {
-      setIsAnimating(false)
-      setTargetPosition(null)
-    }, 1000)
-  }
-  
-  const handleNodePageClick = (pageId: number) => {
-    // Set selected node to persist highlights
-    setSelectedNodeId(pageId)
-    if (onNodeClick) {
-      onNodeClick(pageId)
-    }
-  }
-  
-  const handleCanvasClick = () => {
-    // Clear selected node when clicking on canvas (but not on a node)
-    // This deselects everything when clicking outside the yellow node
-    setSelectedNodeId(null)
-    setDraggedNodeId(null)
-    setLockedHoveredNodeId(null)
-  }
-
-  // Priority: selected node > locked hovered node (during drag) > current hovered node
-  // Use useMemo to ensure this recalculates when dependencies change
-  const activeHoveredNodeId = useMemo(() => {
-    return selectedNodeId ?? (isDragging ? lockedHoveredNodeId : hoveredNodeId)
-  }, [selectedNodeId, isDragging, lockedHoveredNodeId, hoveredNodeId])
-  
-  // Debug logging
-  useEffect(() => {
-    console.log('[GraphVisualization] State update - selected:', selectedNodeId, 'hovered:', hoveredNodeId, 'active:', activeHoveredNodeId)
-  }, [selectedNodeId, hoveredNodeId, activeHoveredNodeId])
-
-  // Helper: Check if a node is highlighted
-  const isNodeHighlighted = (nodeId: number): boolean => {
-    if (activeHoveredNodeId === null) return false
-    if (nodeId === activeHoveredNodeId) return true
-    
-    const isConnectedToHovered = edges.some(e => 
-      (e.from === activeHoveredNodeId && e.to === nodeId) ||
-      (e.to === activeHoveredNodeId && e.from === nodeId)
-    )
-    const isConnectedToCenter = edges.some(e =>
-      (e.from === data.center_page_id && e.to === nodeId) ||
-      (e.to === data.center_page_id && e.from === nodeId)
-    )
-    
-    // Highlight if connected to hovered node, OR if it's a shared connection (connected to both center and hovered)
-    return isConnectedToHovered || (isConnectedToCenter && isConnectedToHovered && nodeId !== data.center_page_id)
-  }
+  // Calculate which nodes are first-degree (directly connected to center)
+  const firstDegreeNodes = useMemo(() => {
+    const firstDegreeSet = new Set<number>()
+    edges.forEach(edge => {
+      if (edge.from === data.center_page_id) {
+        firstDegreeSet.add(edge.to)
+      }
+      if (edge.to === data.center_page_id) {
+        firstDegreeSet.add(edge.from)
+      }
+    })
+    return firstDegreeSet
+  }, [edges, data.center_page_id])
 
   return (
     <Canvas 
       camera={{ position: [0, 0, 25], fov: 50 }}
-      onClick={handleCanvasClick}
+      shadows
     >
-      <ambientLight intensity={0.5} />
-      <pointLight position={[10, 10, 10]} />
-      <pointLight position={[-10, -10, -10]} color="#4ecdc4" />
+      {/* Ambient light for overall illumination */}
+      <ambientLight intensity={0.4} />
+      
+      {/* Main directional light from top-right */}
+      <directionalLight 
+        position={[15, 15, 15]} 
+        intensity={0.8}
+        castShadow
+        shadow-mapSize-width={2048}
+        shadow-mapSize-height={2048}
+      />
+      
+      {/* Fill light from bottom-left to reduce harsh shadows */}
+      <directionalLight 
+        position={[-10, -10, 5]} 
+        intensity={0.3}
+        color="#4ecdc4"
+      />
+      
+      {/* Point light for additional depth */}
+      <pointLight 
+        position={[10, 10, 10]} 
+        intensity={0.6}
+        distance={50}
+        decay={2}
+      />
+      
+      {/* Rim light from behind for edge definition */}
+      <pointLight 
+        position={[-15, -15, -15]} 
+        intensity={0.4}
+        color="#6b46c1"
+        distance={50}
+        decay={2}
+      />
       
       {/* Edges - all edges between any nodes */}
       {edges.map((edge) => {
@@ -514,22 +252,9 @@ export default function GraphVisualization({ data, onNodeClick }: GraphVisualiza
         const toPos = nodePositions.get(edge.to)
         if (!fromPos || !toPos) return null
         
-        // Edge is highlighted if:
-        // 1. It's directly connected to the hovered node, OR
-        // 2. It connects a highlighted node to the center node
-        const isConnectedToHovered = activeHoveredNodeId !== null && 
-          (edge.from === activeHoveredNodeId || edge.to === activeHoveredNodeId)
-        
-        const fromIsHighlighted = activeHoveredNodeId !== null && isNodeHighlighted(edge.from)
-        const toIsHighlighted = activeHoveredNodeId !== null && isNodeHighlighted(edge.to)
-        const connectsHighlightedToCenter = (fromIsHighlighted && edge.to === data.center_page_id) ||
-          (toIsHighlighted && edge.from === data.center_page_id)
-        
-        const isHighlightedEdge = isConnectedToHovered || connectsHighlightedToCenter
-        
-        // Lower contrast by default, higher contrast when highlighted
-        const edgeColor = isHighlightedEdge ? '#60a5fa' : '#4a5568'
-        const edgeOpacity = isHighlightedEdge ? 0.9 : 0.3
+        // Default edge styling
+        const edgeColor = '#4a5568'
+        const edgeOpacity = 0.3
         
         return (
           <line key={`edge-${edge.from}-${edge.to}-${data.center_page_id}`}>
@@ -558,82 +283,14 @@ export default function GraphVisualization({ data, onNodeClick }: GraphVisualiza
           return null
         }
         
-        // Use the same highlighting logic as edges
-        const isHighlighted = isNodeHighlighted(node.page_id)
-        
-        // Show label if: center node, or first-degree connection of active hovered node
-        const showLabel = node.is_center || (
-          activeHoveredNodeId !== null && 
-          node.page_id !== activeHoveredNodeId &&
-          edges.some(e => 
-            (e.from === activeHoveredNodeId && e.to === node.page_id) ||
-            (e.to === activeHoveredNodeId && e.from === node.page_id)
-          )
-        )
+        const isFirstDegree = firstDegreeNodes.has(node.page_id)
         
         return (
           <GraphNode3D 
             key={`${node.page_id}-${data.center_page_id}`} 
             node={node} 
             position={pos}
-            onNodeClick={handleNodeClick}
-            onNodePageClick={handleNodePageClick}
-            isHighlighted={isHighlighted}
-            showLabel={showLabel}
-            isDragged={draggedNodeId === node.page_id}
-            isDraggingGlobal={isDragging}
-            onHover={(nodeId) => {
-              // Don't update hover state while dragging - keep it locked
-              if (!isDragging) {
-                setHoveredNodeId(nodeId)
-                // Only update ref when hovering (not when clearing)
-                // This preserves the last hovered node for click handler
-                if (nodeId !== null) {
-                  hoveredNodeIdRef.current = nodeId
-                }
-              }
-            }}
-            onPointerDownCapture={(pageId) => {
-              // Capture the hovered node when pointer goes down (before click)
-              // This is the same pattern as drag - capture early, before pointer out fires
-              // Use the state value directly (same as drag logic)
-              clickedHoveredNodeIdRef.current = hoveredNodeId
-              console.log('[GraphVisualization] Pointer down - node:', pageId, 'captured hovered (state):', hoveredNodeId, 'captured hovered (ref):', hoveredNodeIdRef.current)
-            }}
-            onNodeSelect={(pageId) => {
-              // Single click - persist the current hover highlights
-              // Use the captured hovered node from pointer down (same as drag logic)
-              // This ensures we get the hovered node before pointer out clears it
-              const nodeToSelect = clickedHoveredNodeIdRef.current !== null 
-                ? clickedHoveredNodeIdRef.current 
-                : (hoveredNodeId !== null ? hoveredNodeId : (hoveredNodeIdRef.current !== null ? hoveredNodeIdRef.current : pageId))
-              console.log('[GraphVisualization] Node select - clicked:', pageId, 'captured on pointerDown:', clickedHoveredNodeIdRef.current, 'hovered (state):', hoveredNodeId, 'hovered (ref):', hoveredNodeIdRef.current, 'selecting:', nodeToSelect)
-              setSelectedNodeId(nodeToSelect)
-              
-              // Clear the captured value after using it
-              clickedHoveredNodeIdRef.current = null
-            }}
-            onDragStart={(pageId) => {
-              setIsDragging(true)
-              // Set the dragged node to show it in yellow and persist its label
-              setDraggedNodeId(pageId)
-              // Also lock the hovered node for highlighting (same as before)
-              if (hoveredNodeId !== null) {
-                setLockedHoveredNodeId(hoveredNodeId)
-              } else {
-                // If no hovered node, use the clicked node for highlighting
-                setLockedHoveredNodeId(pageId)
-              }
-            }}
-            onDragEnd={(pageId) => {
-              setIsDragging(false)
-              setDraggedNodeId(null)
-              // Persist the selection after drag ends - set selectedNodeId to the dragged node
-              // This keeps the highlights active after you release
-              setSelectedNodeId(pageId)
-              // Clear locked hover when drag ends (selection is now in selectedNodeId)
-              setLockedHoveredNodeId(null)
-            }}
+            isFirstDegree={isFirstDegree}
           />
         )
       })}
@@ -643,28 +300,6 @@ export default function GraphVisualization({ data, onNodeClick }: GraphVisualiza
         dampingFactor={0.05}
         makeDefault
       />
-      
-      {/* Track drag state via canvas events */}
-      <DragTracker 
-        onDragStart={() => {
-          setIsDragging(true)
-          // Lock the current hovered node when drag starts
-          if (hoveredNodeId !== null) {
-            setLockedHoveredNodeId(hoveredNodeId)
-          }
-        }}
-        onDragEnd={() => {
-          setIsDragging(false)
-          // Clear dragged node and locked hover when drag ends
-          setDraggedNodeId(null)
-          setLockedHoveredNodeId(null)
-        }}
-      />
-      
-      {/* Camera animation controller */}
-      {targetPosition && isAnimating && (
-        <CameraAnimator targetPosition={targetPosition} />
-      )}
     </Canvas>
   )
 }

@@ -282,37 +282,72 @@ export default function Home() {
       </div>
 
       {/* Floating Info Panel */}
-      {selectedNode && (
-        <div className="absolute top-20 right-6 w-80 bg-[#121420]/95 backdrop-blur-sm border border-[#22263a] rounded-lg shadow-2xl z-40 overflow-hidden">
-          <div className="p-6 space-y-4 max-h-[calc(100vh-8rem)] overflow-y-auto">
-            {/* Node Title */}
-            <div>
-              <h2 className="text-xl font-bold text-[#eaf0ff] mb-2">{selectedNode.title}</h2>
-              
-              {/* Metadata */}
-              <div className="space-y-2 text-sm">
-                <div className="flex justify-between">
-                  <span className="text-[#eaf0ff]/60">Page ID:</span>
-                  <span className="text-[#eaf0ff]">{selectedNode.page_id}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-[#eaf0ff]/60">Out Degree:</span>
-                  <span className="text-[#eaf0ff]">{selectedNode.out_degree}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-[#eaf0ff]/60">In Degree:</span>
-                  <span className="text-[#eaf0ff]">{selectedNode.in_degree}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-[#eaf0ff]/60">Total Connections:</span>
-                  <span className="text-[#eaf0ff]">{selectedNode.out_degree + selectedNode.in_degree}</span>
+      {selectedNode && graphData && (() => {
+        // Calculate relationship statistics
+        const nodeId = selectedNode.page_id
+        const edges = graphData.edges || []
+        
+        // Outbound links (edges where this node is the source)
+        const outboundLinks = edges.filter((e: any) => e.from === nodeId)
+        const outboundCount = outboundLinks.length
+        
+        // Inbound links (edges where this node is the target)
+        const inboundLinks = edges.filter((e: any) => e.to === nodeId)
+        const inboundCount = inboundLinks.length
+        
+        // Find two-way relationships (both A->B and B->A exist)
+        const outboundTargets = new Set(outboundLinks.map((e: any) => e.to))
+        const inboundSources = new Set(inboundLinks.map((e: any) => e.from))
+        const twoWayCount = Array.from(outboundTargets).filter((target: any) => 
+          inboundSources.has(target)
+        ).length
+        
+        // One-way relationships (only one direction exists)
+        const oneWayOutbound = outboundCount - twoWayCount
+        const oneWayInbound = inboundCount - twoWayCount
+        const oneWayTotal = oneWayOutbound + oneWayInbound
+        
+        return (
+          <div className="absolute top-20 right-6 w-80 bg-[#121420]/95 backdrop-blur-sm border border-[#22263a] rounded-lg shadow-2xl z-40 overflow-hidden">
+            <div className="p-6 space-y-4 max-h-[calc(100vh-8rem)] overflow-y-auto">
+              {/* Node Title */}
+              <div>
+                <h2 className="text-xl font-bold text-[#eaf0ff] mb-2">{selectedNode.title}</h2>
+                
+                {/* Metadata */}
+                <div className="space-y-3 text-sm">
+                  <div className="flex justify-between">
+                    <span className="text-[#eaf0ff]/60">Page ID:</span>
+                    <span className="text-[#eaf0ff]">{selectedNode.page_id}</span>
+                  </div>
+                  
+                  {/* Relationship Breakdown */}
+                  <div className="pt-2 border-t border-[#22263a] space-y-2">
+                    <div className="flex justify-between text-[#eaf0ff]/80">
+                      <span>One way outbound links</span>
+                      <span className="text-[#eaf0ff]">{oneWayOutbound}</span>
+                    </div>
+                    <div className="flex justify-between text-[#eaf0ff]/80">
+                      <span>One way inbound links</span>
+                      <span className="text-[#eaf0ff]">{oneWayInbound}</span>
+                    </div>
+                    <div className="flex justify-between text-[#eaf0ff]/80">
+                      <span>Two way links</span>
+                      <span className="text-[#eaf0ff]">{twoWayCount}</span>
+                    </div>
+                    <div className="pt-2 border-t border-[#22263a]">
+                      <div className="flex justify-between text-[#eaf0ff] font-medium">
+                        <span>Total first degree relationships</span>
+                        <span className="text-[#eaf0ff]">{oneWayTotal + twoWayCount}</span>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
-
           </div>
-        </div>
-      )}
+        )
+      })()}
     </main>
   )
 }
