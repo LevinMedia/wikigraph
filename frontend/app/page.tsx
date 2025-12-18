@@ -1,10 +1,13 @@
 'use client'
 
 import { useState, useEffect, useRef } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
 import GraphVisualization from '@/components/GraphVisualization'
 import { fetchEgoGraph, fetchAllGraph, searchPages } from '@/lib/api'
 
 export default function Home() {
+  const router = useRouter()
+  const searchParams = useSearchParams()
   const [graphData, setGraphData] = useState<any>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -21,12 +24,17 @@ export default function Home() {
   const searchInputRef = useRef<HTMLInputElement>(null)
   const resultsRef = useRef<HTMLDivElement>(null)
 
-  const loadGraph = async (id: string) => {
+  const loadGraph = async (id: string, updateUrl: boolean = true) => {
     if (!id.trim()) return
     
     setLoading(true)
     setError(null)
     try {
+      // Update URL if requested (but not when loading from URL)
+      if (updateUrl) {
+        router.push(`/?page=${id}`, { scroll: false })
+      }
+      
       const data = await fetchEgoGraph(parseInt(id), 500)
       setGraphData(data)
       setPageId(id)
@@ -46,6 +54,9 @@ export default function Home() {
     setLoading(true)
     setError(null)
     try {
+      // Update URL with the new page ID
+      router.push(`/?page=${pageId}`, { scroll: false })
+      
       // Fetch 1-hop ego graph for the clicked node
       const newGraphData = await fetchEgoGraph(pageId, 500)
       setGraphData(newGraphData)
@@ -60,6 +71,32 @@ export default function Home() {
       setLoading(false)
     }
   }
+  
+  // Load graph from URL on mount or when URL changes
+  useEffect(() => {
+    const urlPageId = searchParams.get('page')
+    if (urlPageId && urlPageId !== pageId) {
+      // Load from URL without updating URL again
+      const loadFromUrl = async () => {
+        setLoading(true)
+        setError(null)
+        try {
+          const data = await fetchEgoGraph(parseInt(urlPageId), 500)
+          setGraphData(data)
+          setPageId(urlPageId)
+          const centerNode = data.nodes.find((n: any) => n.is_center)
+          setSelectedNode(centerNode || null)
+        } catch (err: any) {
+          setError(err.message || 'Failed to load graph')
+          setGraphData(null)
+          setSelectedNode(null)
+        } finally {
+          setLoading(false)
+        }
+      }
+      loadFromUrl()
+    }
+  }, [searchParams, pageId])
 
   // Search functionality
   useEffect(() => {
@@ -118,7 +155,7 @@ export default function Home() {
   const handleSelectResult = (result: any) => {
     setSearchQuery(result.title)
     setShowResults(false)
-    loadGraph(result.page_id.toString())
+    loadGraph(result.page_id.toString(), true) // Update URL when searching
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
