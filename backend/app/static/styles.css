@@ -1,0 +1,17 @@
+:root { font-family: ui-sans-serif, system-ui, -apple-system; }
+body { margin: 0; background: #0b0c10; color: #eaf0ff; }
+.wrap { max-width: 980px; margin: 0 auto; padding: 24px; }
+header h1 { margin: 0 0 8px; }
+.sub { opacity: 0.8; margin: 0 0 16px; }
+.card { background: #121420; border: 1px solid #22263a; border-radius: 12px; padding: 16px; margin: 12px 0; }
+.row { display: flex; gap: 8px; align-items: center; }
+input { flex: 1; padding: 10px 12px; border-radius: 10px; border: 1px solid #2b3050; background: #0f1120; color: #eaf0ff; }
+button { padding: 10px 12px; border-radius: 10px; border: 1px solid #2b3050; background: #1b2040; color: #eaf0ff; cursor: pointer; }
+button:hover { background: #232a55; }
+.small { font-size: 12px; opacity: 0.9; margin-top: 8px; }
+.jobs { margin-top: 12px; display: grid; gap: 8px; }
+.job { padding: 10px; border-radius: 10px; border: 1px solid #22263a; background: #0f1120; }
+.job .top { display: flex; justify-content: space-between; gap: 12px; }
+.badge { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid #2b3050; opacity: 0.9; }
+pre { white-space: pre-wrap; background: #0f1120; border: 1px solid #22263a; border-radius: 10px; padding: 10px; overflow: auto; }
+
