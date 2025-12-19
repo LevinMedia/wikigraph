@@ -6,6 +6,8 @@ BACKEND_DIR = Path(__file__).parent.parent
 
 class Settings(BaseSettings):
     SUPABASE_DB_URL: str
+    SUPABASE_URL: str = ""  # For realtime subscriptions in admin dashboard
+    SUPABASE_ANON_KEY: str = ""  # For realtime subscriptions in admin dashboard
     WIKI_API_BASE: str = "https://en.wikipedia.org/w/api.php"
     CRAWLER_CONCURRENCY: int = 6
     CRAWLER_POLL_SECONDS: float = 1.0
@@ -15,6 +17,7 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = str(BACKEND_DIR / ".env")
+        extra = "ignore"  # Ignore extra fields (like NEXT_PUBLIC_* vars that are for frontend)
 
 settings = Settings()
 

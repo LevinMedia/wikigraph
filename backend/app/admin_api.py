@@ -13,9 +13,13 @@ async def enqueue(req: EnqueueRequest):
         info = await resolve_title(req.title)
         await upsert_page(pool, info["page_id"], info["title"], info["namespace"], info["is_redirect"])
         
-        # Store auto_crawl flag in last_cursor
+        # Store crawl configuration in last_cursor
+        # Always use crawl_with_neighbors for new enqueues (crawl initial + first-degree, discover second-degree)
         import json
-        cursor_data = {"link_direction": req.link_direction}
+        cursor_data = {
+            "link_direction": req.link_direction,
+            "crawl_with_neighbors": True  # Always crawl with neighbors for new enqueues
+        }
         if req.auto_crawl_neighbors:
             cursor_data["auto_crawl"] = "true"
         
@@ -48,19 +52,52 @@ async def enqueue(req: EnqueueRequest):
 @router.get("/jobs")
 async def jobs():
     pool = await get_pool()
-    rows = await pool.fetch(
+    # Fetch jobs with better ordering to ensure done jobs are included
+    # Strategy: Get a mix of active jobs AND recent done jobs
+    # Use UNION to get both active jobs and done jobs separately
+    active_rows = await pool.fetch(
         """
         select pf.page_id, pf.status, pf.priority, pf.started_at, pf.finished_at, pf.last_error,
                pf.last_cursor,
-               p.title, p.out_degree, p.in_degree
-        from page_fetch pf join pages p on p.page_id=pf.page_id
+               coalesce(p.title, 'Unknown') as title, 
+               coalesce(p.out_degree, 0) as out_degree, 
+               coalesce(p.in_degree, 0) as in_degree
+        from page_fetch pf 
+        left join pages p on p.page_id=pf.page_id
+        where pf.status in ('running', 'queued', 'error', 'paused', 'discovered')
         order by
-          case pf.status when 'running' then 0 when 'queued' then 1 when 'error' then 2 else 3 end,
-          pf.priority desc, pf.updated_at desc
-        limit 200
+          case pf.status 
+            when 'running' then 0 
+            when 'queued' then 1 
+            when 'error' then 2 
+            when 'paused' then 3
+            when 'discovered' then 4
+            else 5
+          end,
+          pf.priority desc, 
+          pf.updated_at desc
+        limit 500
         """
     )
-    return {"jobs": [dict(r) for r in rows]}
+    
+    done_rows = await pool.fetch(
+        """
+        select pf.page_id, pf.status, pf.priority, pf.started_at, pf.finished_at, pf.last_error,
+               pf.last_cursor,
+               coalesce(p.title, 'Unknown') as title, 
+               coalesce(p.out_degree, 0) as out_degree, 
+               coalesce(p.in_degree, 0) as in_degree
+        from page_fetch pf 
+        left join pages p on p.page_id=pf.page_id
+        where pf.status = 'done'
+        order by pf.finished_at desc
+        limit 500
+        """
+    )
+    
+    # Combine results: active jobs first, then done jobs
+    all_rows = list(active_rows) + list(done_rows)
+    return {"jobs": [dict(r) for r in all_rows]}
 
 @router.post("/jobs/{page_id}/cancel")
 async def cancel_job(page_id: int):
@@ -77,4 +114,39 @@ async def cancel_job(page_id: int):
     if result == "UPDATE 0":
         raise HTTPException(status_code=404, detail="Job not found or cannot be cancelled")
     return {"ok": True, "message": f"Job {page_id} cancelled"}
+
+@router.post("/kill-all-running")
+async def kill_all_running():
+    """Kill all running and queued jobs"""
+    pool = await get_pool()
+    result = await pool.execute(
+        """
+        UPDATE page_fetch 
+        SET status = 'paused', last_error = 'Killed by admin'
+        WHERE status IN ('queued', 'running')
+        """
+    )
+    return {"ok": True, "message": f"Killed all running/queued jobs", "affected": result}
+
+@router.post("/stop-crawler")
+async def stop_crawler():
+    """Stop the crawler loop (will restart on next request or server restart)"""
+    from .main import _stop_event
+    _stop_event.set()
+    return {"ok": True, "message": "Crawler stop signal sent (will restart on server restart)"}
+
+@router.post("/delete-all-data")
+async def delete_all_data():
+    """Delete all data from the database (DANGEROUS - for testing only)"""
+    pool = await get_pool()
+    try:
+        # Delete in order to respect foreign key constraints
+        await pool.execute("DELETE FROM page_categories")
+        await pool.execute("DELETE FROM page_fetch")
+        await pool.execute("DELETE FROM links")
+        await pool.execute("DELETE FROM pages")
+        await pool.execute("DELETE FROM categories")
+        return {"ok": True, "message": "All data deleted"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting data: {str(e)}")
 

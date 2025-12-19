@@ -36,6 +36,15 @@ They are **totally disconnected** - the Next.js app only needs Supabase keys.
   - Get from: Supabase Dashboard → Settings → Database → Connection string → URI
   - Format: `postgresql://postgres:[PASSWORD]@[PROJECT-REF].supabase.co:5432/postgres`
 
+**Optional (for admin dashboard realtime updates):**
+- `SUPABASE_URL` - Supabase project URL (for realtime subscriptions in admin dashboard)
+  - Get from: Supabase Dashboard → Settings → API → Project URL
+  - Format: `https://[PROJECT-REF].supabase.co`
+  - If not set, admin dashboard will work but won't have realtime updates
+- `SUPABASE_ANON_KEY` - Supabase anonymous/public key (for realtime subscriptions)
+  - Get from: Supabase Dashboard → Settings → API → `anon` `public` key
+  - If not set, admin dashboard will work but won't have realtime updates
+
 **Optional (have defaults):**
 - `WIKI_API_BASE` - Wikipedia API URL (default: `https://en.wikipedia.org/w/api.php`)
 - `CRAWLER_CONCURRENCY` - Number of concurrent crawlers (default: `6`)
@@ -66,6 +75,8 @@ They are **totally disconnected** - the Next.js app only needs Supabase keys.
 | Key | Purpose |
 |-----|---------|
 | `SUPABASE_DB_URL` | Direct PostgreSQL connection for asyncpg. Used for all database operations. |
+| `SUPABASE_URL` | Supabase project URL. Used for realtime subscriptions in admin dashboard. Optional - dashboard works without it but won't auto-update. |
+| `SUPABASE_ANON_KEY` | Supabase anonymous key. Used for realtime subscriptions in admin dashboard. Optional - dashboard works without it but won't auto-update. |
 
 ### Frontend Keys
 
@@ -90,7 +101,18 @@ They are **totally disconnected** - the Next.js app only needs Supabase keys.
 
 ## Getting Your Keys
 
-### Step 1: Supabase Database URL (Backend)
+### Step 1: Enable Realtime (Required for Admin Dashboard)
+
+**Important:** You must enable Realtime on the `page_fetch` table for the admin dashboard to auto-update.
+
+1. Go to Supabase Dashboard
+2. Select your project
+3. Go to **Database** → **Replication**
+4. Find the `page_fetch` table in the list
+5. Toggle the switch to **enable Realtime** for `page_fetch`
+6. (Optional) Enable Realtime for `pages` and `links` if you want realtime graph updates in the frontend
+
+### Step 2: Supabase Database URL (Backend)
 
 1. Go to Supabase Dashboard
 2. Select your project
@@ -100,14 +122,14 @@ They are **totally disconnected** - the Next.js app only needs Supabase keys.
 6. Copy the connection string
 7. Replace `[YOUR-PASSWORD]` with your database password
 
-### Step 2: Supabase API Keys (Frontend - Optional)
+### Step 3: Supabase API Keys (Frontend & Backend)
 
 1. Go to Supabase Dashboard
 2. Select your project
 3. Go to **Settings** → **API**
 4. Copy:
-   - **Project URL** → `NEXT_PUBLIC_SUPABASE_URL`
-   - **anon public** key → `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+   - **Project URL** → Use for both `NEXT_PUBLIC_SUPABASE_URL` (frontend) and `SUPABASE_URL` (backend)
+   - **anon public** key → Use for both `NEXT_PUBLIC_SUPABASE_ANON_KEY` (frontend) and `SUPABASE_ANON_KEY` (backend)
 
 ## Security Notes
 

@@ -12,11 +12,16 @@
 2. Go to **SQL Editor**
 3. Copy and paste the contents of `backend/scripts/create_tables.sql`
 4. Click **Run**
-5. Go to **Settings** → **Database** → **Connection string** → **URI**
-6. Copy the connection string (you'll need it for the backend `.env`)
-7. Go to **Settings** → **API** and copy:
-   - Project URL (for frontend `NEXT_PUBLIC_SUPABASE_URL`)
-   - `anon` `public` key (for frontend `NEXT_PUBLIC_SUPABASE_ANON_KEY`)
+5. **Enable Realtime** (required for auto-updating admin dashboard):
+   - Go to **Database** → **Replication**
+   - Find the `page_fetch` table
+   - Toggle the switch to enable Realtime for `page_fetch`
+   - (Optional: Enable for `pages` and `links` if you want realtime graph updates)
+6. Go to **Settings** → **Database** → **Connection string** → **URI**
+7. Copy the connection string (you'll need it for the backend `.env`)
+8. Go to **Settings** → **API** and copy:
+   - Project URL (for frontend `NEXT_PUBLIC_SUPABASE_URL` and backend `SUPABASE_URL`)
+   - `anon` `public` key (for frontend `NEXT_PUBLIC_SUPABASE_ANON_KEY` and backend `SUPABASE_ANON_KEY`)
 
 ## Step 2: Set Up Backend
 

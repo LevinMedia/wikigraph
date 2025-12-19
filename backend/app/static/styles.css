@@ -1,6 +1,6 @@
 :root { font-family: ui-sans-serif, system-ui, -apple-system; }
 body { margin: 0; background: #0b0c10; color: #eaf0ff; }
-.wrap { max-width: 980px; margin: 0 auto; padding: 24px; }
+.wrap { width: 100%; max-width: none; margin: 0; padding: 24px; box-sizing: border-box; }
 header h1 { margin: 0 0 8px; }
 .sub { opacity: 0.8; margin: 0 0 16px; }
 .card { background: #121420; border: 1px solid #22263a; border-radius: 12px; padding: 16px; margin: 12px 0; }
@@ -14,4 +14,18 @@ button:hover { background: #232a55; }
 .job .top { display: flex; justify-content: space-between; gap: 12px; }
 .badge { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid #2b3050; opacity: 0.9; }
 pre { white-space: pre-wrap; background: #0f1120; border: 1px solid #22263a; border-radius: 10px; padding: 10px; overflow: auto; }
+
+/* Tabs */
+.tabs { display: flex; gap: 8px; border-bottom: 1px solid #22263a; margin-bottom: 16px; }
+.tab-button { padding: 8px 16px; background: transparent; border: none; border-bottom: 2px solid transparent; color: #eaf0ff; cursor: pointer; opacity: 0.7; }
+.tab-button:hover { opacity: 1; }
+.tab-button.active,
+.tab-button[aria-selected="true"] { opacity: 1; border-bottom-color: #4ecdc4; }
+
+/* Table styles */
+table { width: 100%; border-collapse: collapse; }
+table th, table td { padding: 10px; text-align: left; border-bottom: 1px solid #22263a; }
+table th { background: #0f1120; font-weight: 600; color: #eaf0ff; }
+table td { color: #eaf0ff; opacity: 0.9; }
+table tr:hover { background: #0f1120; }
 

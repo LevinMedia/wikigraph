@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
+import { Switch } from '@headlessui/react'
 import GraphVisualization from '@/components/GraphVisualization'
 import { fetchEgoGraph, fetchAllGraph, searchPages } from '@/lib/api'
 
@@ -13,6 +14,12 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null)
   const [pageId, setPageId] = useState<string>('')
   const [selectedNode, setSelectedNode] = useState<any>(null)
+  const [selectedNodeIdFromList, setSelectedNodeIdFromList] = useState<number | null>(null)
+  
+  // Relationship type filters
+  const [showTwoWay, setShowTwoWay] = useState(true)
+  const [showOutbound, setShowOutbound] = useState(true)
+  const [showInbound, setShowInbound] = useState(true)
   
   // Search state
   const [searchQuery, setSearchQuery] = useState('')
@@ -41,10 +48,13 @@ export default function Home() {
       // Set selected node
       const centerNode = data.nodes.find((n: any) => n.is_center)
       setSelectedNode(centerNode || null)
+      // Clear list selection when graph changes
+      setSelectedNodeIdFromList(null)
     } catch (err: any) {
       setError(err.message || 'Failed to load graph')
       setGraphData(null)
       setSelectedNode(null)
+      setSelectedNodeIdFromList(null)
     } finally {
       setLoading(false)
     }
@@ -65,6 +75,8 @@ export default function Home() {
       // Update selected node
       const centerNode = newGraphData.nodes.find((n: any) => n.page_id === pageId)
       setSelectedNode(centerNode || null)
+      // Clear list selection when graph changes
+      setSelectedNodeIdFromList(null)
     } catch (err: any) {
       setError(err.message || 'Failed to load node graph')
     } finally {
@@ -193,10 +205,13 @@ export default function Home() {
       // Set selected node to the center
       const centerNode = data.nodes.find((n: any) => n.is_center)
       setSelectedNode(centerNode || null)
+      // Clear list selection when graph changes
+      setSelectedNodeIdFromList(null)
     } catch (err: any) {
       setError(err.message || 'Failed to load all graph')
       setGraphData(null)
       setSelectedNode(null)
+      setSelectedNodeIdFromList(null)
     } finally {
       setLoading(false)
     }
@@ -266,7 +281,17 @@ export default function Home() {
       {/* Main Graph Area - Full Screen */}
       <div className="flex-1 relative w-full h-full">
         {displayGraphData ? (
-          <GraphVisualization data={displayGraphData} onNodeClick={handleNodeClick} />
+          <GraphVisualization 
+            data={displayGraphData} 
+            onNodeClick={handleNodeClick}
+            onNodeSelect={(nodeId) => setSelectedNodeIdFromList(nodeId)}
+            relationshipFilters={{
+              showTwoWay,
+              showOutbound,
+              showInbound
+            }}
+            externalSelectedNodeId={selectedNodeIdFromList}
+          />
         ) : (
           <div className="absolute inset-0 flex items-center justify-center">
             <div className="text-center">
@@ -283,33 +308,60 @@ export default function Home() {
 
       {/* Floating Info Panel */}
       {selectedNode && graphData && (() => {
-        // Calculate relationship statistics
+        // Calculate relationships list
         const nodeId = selectedNode.page_id
         const edges = graphData.edges || []
+        const nodes = graphData.nodes || []
         
-        // Outbound links (edges where this node is the source)
-        const outboundLinks = edges.filter((e: any) => e.from === nodeId)
-        const outboundCount = outboundLinks.length
+        // Create a map of node IDs to node objects for quick lookup
+        const nodeMap = new Map(nodes.map((n: any) => [n.page_id, n]))
         
-        // Inbound links (edges where this node is the target)
-        const inboundLinks = edges.filter((e: any) => e.to === nodeId)
-        const inboundCount = inboundLinks.length
+        // Get all unique connected node IDs
+        const connectedNodeIds = new Set<number>()
+        edges.forEach((e: any) => {
+          if (e.from === nodeId) {
+            connectedNodeIds.add(e.to)
+          }
+          if (e.to === nodeId) {
+            connectedNodeIds.add(e.from)
+          }
+        })
         
-        // Find two-way relationships (both A->B and B->A exist)
-        const outboundTargets = new Set(outboundLinks.map((e: any) => e.to))
-        const inboundSources = new Set(inboundLinks.map((e: any) => e.from))
-        const twoWayCount = Array.from(outboundTargets).filter((target: any) => 
-          inboundSources.has(target)
-        ).length
+        // Build relationship list with type information
+        const relationships = Array.from(connectedNodeIds).map((connectedId: number) => {
+          const connectedNode = nodeMap.get(connectedId)
+          const hasOutbound = edges.some((e: any) => e.from === nodeId && e.to === connectedId)
+          const hasInbound = edges.some((e: any) => e.to === nodeId && e.from === connectedId)
+          
+          let relationshipType = ''
+          if (hasOutbound && hasInbound) {
+            relationshipType = 'Two way'
+          } else if (hasOutbound) {
+            relationshipType = 'Outbound'
+          } else if (hasInbound) {
+            relationshipType = 'Inbound'
+          }
+          
+          return {
+            nodeId: connectedId,
+            title: connectedNode?.title || `Page ${connectedId}`,
+            type: relationshipType
+          }
+        })
         
-        // One-way relationships (only one direction exists)
-        const oneWayOutbound = outboundCount - twoWayCount
-        const oneWayInbound = inboundCount - twoWayCount
-        const oneWayTotal = oneWayOutbound + oneWayInbound
+        // Sort relationships: two-way first, then inbound, then outbound, then alphabetically by title
+        relationships.sort((a, b) => {
+          const typeOrder: { [key: string]: number } = { 'Two way': 0, 'Inbound': 1, 'Outbound': 2 }
+          const aOrder = typeOrder[a.type] ?? 999
+          const bOrder = typeOrder[b.type] ?? 999
+          const typeDiff = aOrder - bOrder
+          if (typeDiff !== 0) return typeDiff
+          return a.title.localeCompare(b.title)
+        })
         
         return (
-          <div className="absolute top-20 right-6 w-80 bg-[#121420]/95 backdrop-blur-sm border border-[#22263a] rounded-lg shadow-2xl z-40 overflow-hidden">
-            <div className="p-6 space-y-4 max-h-[calc(100vh-8rem)] overflow-y-auto">
+          <div className="absolute top-20 right-6 w-80 bg-[#121420]/95 backdrop-blur-sm border border-[#22263a] rounded-lg shadow-2xl z-40 overflow-hidden flex flex-col max-h-[calc(100vh-8rem)]">
+            <div className="p-6 flex-shrink-0">
               {/* Node Title */}
               <div>
                 <h2 className="text-xl font-bold text-[#eaf0ff] mb-2">{selectedNode.title}</h2>
@@ -321,28 +373,116 @@ export default function Home() {
                     <span className="text-[#eaf0ff]">{selectedNode.page_id}</span>
                   </div>
                   
-                  {/* Relationship Breakdown */}
-                  <div className="pt-2 border-t border-[#22263a] space-y-2">
-                    <div className="flex justify-between text-[#eaf0ff]/80">
-                      <span>One way outbound links</span>
-                      <span className="text-[#eaf0ff]">{oneWayOutbound}</span>
+                  {/* Relationship Filters */}
+                  <div className="pt-2 border-t border-[#22263a] pb-3">
+                    <div className="text-sm font-medium text-[#eaf0ff] mb-2">
+                      Show Relationships
                     </div>
-                    <div className="flex justify-between text-[#eaf0ff]/80">
-                      <span>One way inbound links</span>
-                      <span className="text-[#eaf0ff]">{oneWayInbound}</span>
-                    </div>
-                    <div className="flex justify-between text-[#eaf0ff]/80">
-                      <span>Two way links</span>
-                      <span className="text-[#eaf0ff]">{twoWayCount}</span>
-                    </div>
-                    <div className="pt-2 border-t border-[#22263a]">
-                      <div className="flex justify-between text-[#eaf0ff] font-medium">
-                        <span>Total first degree relationships</span>
-                        <span className="text-[#eaf0ff]">{oneWayTotal + twoWayCount}</span>
-                      </div>
+                    <div className="space-y-2">
+                      <Switch.Group>
+                        <div className="flex items-center justify-between">
+                          <Switch.Label className="text-sm text-[#eaf0ff]/80 cursor-pointer">
+                            Two way
+                          </Switch.Label>
+                          <Switch
+                            checked={showTwoWay}
+                            onChange={setShowTwoWay}
+                            className={`${
+                              showTwoWay ? 'bg-[#4ecdc4]' : 'bg-[#2b3050]'
+                            } relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-[#4ecdc4] focus:ring-offset-2 focus:ring-offset-[#121420]`}
+                          >
+                            <span
+                              className={`${
+                                showTwoWay ? 'translate-x-6' : 'translate-x-1'
+                              } inline-block h-4 w-4 transform rounded-full bg-white transition-transform`}
+                            />
+                          </Switch>
+                        </div>
+                      </Switch.Group>
+                      <Switch.Group>
+                        <div className="flex items-center justify-between">
+                          <Switch.Label className="text-sm text-[#eaf0ff]/80 cursor-pointer">
+                            Inbound
+                          </Switch.Label>
+                          <Switch
+                            checked={showInbound}
+                            onChange={setShowInbound}
+                            className={`${
+                              showInbound ? 'bg-[#8b5cf6]' : 'bg-[#2b3050]'
+                            } relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-[#8b5cf6] focus:ring-offset-2 focus:ring-offset-[#121420]`}
+                          >
+                            <span
+                              className={`${
+                                showInbound ? 'translate-x-6' : 'translate-x-1'
+                              } inline-block h-4 w-4 transform rounded-full bg-white transition-transform`}
+                            />
+                          </Switch>
+                        </div>
+                      </Switch.Group>
+                      <Switch.Group>
+                        <div className="flex items-center justify-between">
+                          <Switch.Label className="text-sm text-[#eaf0ff]/80 cursor-pointer">
+                            Outbound
+                          </Switch.Label>
+                          <Switch
+                            checked={showOutbound}
+                            onChange={setShowOutbound}
+                            className={`${
+                              showOutbound ? 'bg-[#a78bfa]' : 'bg-[#2b3050]'
+                            } relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-[#a78bfa] focus:ring-offset-2 focus:ring-offset-[#121420]`}
+                          >
+                            <span
+                              className={`${
+                                showOutbound ? 'translate-x-6' : 'translate-x-1'
+                              } inline-block h-4 w-4 transform rounded-full bg-white transition-transform`}
+                            />
+                          </Switch>
+                        </div>
+                      </Switch.Group>
                     </div>
                   </div>
                 </div>
+              </div>
+            </div>
+            
+            {/* Relationships List - Scrollable */}
+            <div className="px-6 pb-6 pt-2 border-t border-[#22263a] flex-1 overflow-hidden flex flex-col min-h-0">
+              <div className="text-sm font-medium text-[#eaf0ff] mb-2 flex-shrink-0">
+                Relationships ({relationships.length})
+              </div>
+              <div className="space-y-1 overflow-y-auto flex-1 min-h-0">
+                {relationships.length === 0 ? (
+                  <div className="text-sm text-[#eaf0ff]/60 py-2">No relationships</div>
+                ) : (
+                  relationships.map((rel, index) => {
+                    const isSelected = selectedNodeIdFromList === rel.nodeId
+                    return (
+                      <div 
+                        key={`${rel.nodeId}-${index}`}
+                        onClick={() => {
+                          // Toggle selection: if clicking the same node, deselect; otherwise select new node
+                          setSelectedNodeIdFromList(isSelected ? null : rel.nodeId)
+                        }}
+                        className={`text-sm py-1.5 px-2 rounded hover:bg-[#1b2040]/50 border-b border-[#22263a]/50 last:border-b-0 cursor-pointer transition-colors ${
+                          isSelected ? 'bg-[#1b2040] border-l-2 border-l-[#4ecdc4]' : ''
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <span className="text-[#eaf0ff] flex-1 truncate">{rel.title}</span>
+                          <span className={`text-xs px-2 py-0.5 rounded flex-shrink-0 ${
+                            rel.type === 'Two way' 
+                              ? 'bg-[#4ecdc4]/20 text-[#4ecdc4]'
+                              : rel.type === 'Inbound'
+                              ? 'bg-[#8b5cf6]/20 text-[#8b5cf6]'
+                              : 'bg-[#a78bfa]/20 text-[#a78bfa]'
+                          }`}>
+                            {rel.type}
+                          </span>
+                        </div>
+                      </div>
+                    )
+                  })
+                )}
               </div>
             </div>
           </div>

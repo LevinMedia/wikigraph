@@ -37,8 +37,12 @@ async def startup():
     logger = logging.getLogger(__name__)
     logger.info("Starting crawler loop...")
     global _crawler_task
-    _crawler_task = asyncio.create_task(crawler_loop(_stop_event))
-    logger.info("Crawler task created")
+    try:
+        _crawler_task = asyncio.create_task(crawler_loop(_stop_event))
+        logger.info("Crawler task created")
+    except Exception as e:
+        logger.error(f"Failed to start crawler loop: {e}", exc_info=True)
+        raise
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -48,5 +52,10 @@ async def shutdown():
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    from .settings import settings
+    return templates.TemplateResponse("index.html", {
+        "request": request,
+        "supabase_url": settings.SUPABASE_URL,
+        "supabase_anon_key": settings.SUPABASE_ANON_KEY,
+    })
 

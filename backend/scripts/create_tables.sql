@@ -37,7 +37,7 @@ create index if not exists links_to_idx on links (to_page_id);
 -- 3) Crawl jobs / status for fetching ALL outbound links for a page
 create table if not exists page_fetch (
   page_id         bigint primary key references pages(page_id) on delete cascade,
-  status          text not null check (status in ('queued','running','done','error','paused')) default 'queued',
+  status          text not null check (status in ('queued','running','done','error','paused','discovered')) default 'queued',
   priority        int not null default 0,
 
   -- progress tracking

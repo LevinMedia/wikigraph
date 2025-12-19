@@ -5,57 +5,21 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>Wiki Graph Crawler</title>
     <link rel="stylesheet" href="/static/styles.css" />
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
+    <script>
+      // Pass Supabase config to React app
+      window.SUPABASE_CONFIG = {
+        url: '{{ supabase_url }}',
+        anonKey: '{{ supabase_anon_key }}'
+      };
+    </script>
   </head>
   <body>
-    <div class="wrap">
-      <header>
-        <h1>Wiki Graph Crawler</h1>
-        <p class="sub">Enqueue pages to fetch ALL outbound links, store into Supabase, and serve ego graphs.</p>
-      </header>
-
-      <section class="card">
-        <h2>Enqueue</h2>
-        <div class="row">
-          <input id="title" placeholder="Wikipedia title or URL" />
-          <input id="priority" type="number" value="0" placeholder="Priority" title="Higher priority jobs are processed first" />
-          <button id="enqueue">Enqueue</button>
-        </div>
-        <div style="margin-top: 8px; display: flex; gap: 12px; align-items: center;">
-          <label style="display: flex; align-items: center; gap: 4px; font-size: 12px;">
-            <input type="radio" name="linkDirection" value="outbound" checked />
-            Outbound links
-          </label>
-          <label style="display: flex; align-items: center; gap: 4px; font-size: 12px;">
-            <input type="radio" name="linkDirection" value="inbound" />
-            Inbound links (backlinks)
-          </label>
-        </div>
-        <div style="margin-top: 8px;">
-          <label style="display: flex; align-items: center; gap: 4px; font-size: 12px;">
-            <input type="checkbox" id="autoCrawl" />
-            Auto-crawl neighbors (sequentially enqueue linked pages)
-          </label>
-        </div>
-        <div id="enqueueResult" class="small"></div>
-      </section>
-
-      <section class="card">
-        <h2>Jobs</h2>
-        <button id="refresh">Refresh</button>
-        <div id="jobs" class="jobs"></div>
-      </section>
-
-      <section class="card">
-        <h2>Quick ego graph fetch (API test)</h2>
-        <div class="row">
-          <input id="pageId" placeholder="page_id" />
-          <button id="fetchEgo">Fetch /api/graph/ego</button>
-        </div>
-        <pre id="egoOut"></pre>
-      </section>
-    </div>
-
-    <script src="/static/app.js"></script>
+    <div id="root"></div>
+    <script type="text/babel" src="/static/app.jsx"></script>
   </body>
 </html>
 
