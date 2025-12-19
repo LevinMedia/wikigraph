@@ -7,5 +7,6 @@ source venv/bin/activate
 mkdir -p logs
 
 # Start uvicorn and log to both stdout and file
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000 2>&1 | tee logs/backend.log
+# --timeout-keep-alive 0 disables the timeout (keeps connections alive indefinitely)
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000 --timeout-keep-alive 0 2>&1 | tee logs/backend.log
 

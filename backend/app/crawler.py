@@ -311,64 +311,98 @@ async def mark_as_discovered(pool, page_ids: list[int], requested_by: Optional[s
             page_id, requested_by, json.dumps(cursor_data)
         )
 
-async def crawl_with_neighbors(pool, initial_page_id: int):
+async def crawl_with_neighbors(pool, initial_page_id: int, degree: int = 0, root_page_id: int = None):
     """
-    Main orchestration function:
-    1. Crawl both inbound and outbound for initial page (page 0)
-    2. Enqueue each 1st degree neighbor as a separate job (visible in dashboard)
-    3. When first-degree neighbors are processed, they'll discover second-degree nodes
+    Main orchestration function for recursive neighbor crawling:
+    1. Crawl both inbound and outbound for the page
+    2. Enqueue each neighbor as a separate job at degree+1 (if below MAX_DEGREE)
+    3. Recursively processes up to MAX_DEGREE degrees of separation
+    
+    Args:
+        pool: Database connection pool
+        initial_page_id: The page to crawl
+        degree: Current degree of separation (0 = root page)
+        root_page_id: The original root page (for tracking)
     """
     import logging
+    import json
     logger = logging.getLogger(__name__)
     
-    # Step 1: Crawl initial page (both directions) - this is "page 0"
-    logger.info(f"Starting crawl for initial page {initial_page_id}")
-    await update_progress(pool, initial_page_id, "crawling_initial_page", 0)
-    initial_connected = await crawl_both_directions(pool, initial_page_id)
-    logger.info(f"Initial page {initial_page_id} connected to {len(initial_connected)} pages")
+    if root_page_id is None:
+        root_page_id = initial_page_id
     
-    # Step 2: Get first-degree neighbors (nodes directly connected to initial page)
-    first_degree_ids = list(initial_connected)
-    logger.info(f"Found {len(first_degree_ids)} first-degree neighbors")
+    # Step 1: Crawl this page (both directions)
+    logger.info(f"Starting crawl for page {initial_page_id} at degree {degree} (root: {root_page_id})")
+    await update_progress(pool, initial_page_id, f"crawling_degree_{degree}", 0)
+    connected = await crawl_both_directions(pool, initial_page_id)
+    logger.info(f"Page {initial_page_id} (degree {degree}) connected to {len(connected)} pages")
     
-    # Step 3: Enqueue first-degree neighbors as separate jobs (they'll be processed by the crawler loop)
-    # These jobs will crawl both directions and discover second-degree nodes
-    import json
-    for first_degree_id in first_degree_ids:
-        # Check if already queued, running, or done
-        existing_status = await pool.fetchval(
-            "SELECT status FROM page_fetch WHERE page_id = $1", 
-            first_degree_id
-        )
+    # Step 2: If we're below MAX_DEGREE, enqueue neighbors at degree+1
+    if degree < settings.MAX_DEGREE:
+        neighbor_ids = list(connected)
+        logger.info(f"Found {len(neighbor_ids)} neighbors for page {initial_page_id} at degree {degree}")
         
-        # Only enqueue if not already done or running
-        if existing_status != 'done' and existing_status != 'running':
-            cursor_data = {
-                "link_direction": "outbound",  # Will crawl both directions
-                "crawl_with_neighbors": False,  # Don't crawl neighbors of neighbors (that would be 3rd degree)
-                "is_first_degree_of": initial_page_id  # Track which initial page this belongs to
-            }
-            await pool.execute(
-                """
-                INSERT INTO page_fetch (page_id, status, priority, last_cursor, requested_by)
-                VALUES ($1, 'queued', 0, $2::jsonb, $3)
-                ON CONFLICT (page_id) DO UPDATE SET
-                  status = CASE 
-                    WHEN page_fetch.status = 'running' THEN page_fetch.status
-                    WHEN page_fetch.status = 'done' THEN page_fetch.status
-                    ELSE 'queued'
-                  END,
-                  last_cursor = COALESCE(excluded.last_cursor, page_fetch.last_cursor)
-                """,
-                first_degree_id, 
-                json.dumps(cursor_data),
-                f"first_degree_of_{initial_page_id}"
+        # Get all pages we've already seen (to avoid re-crawling)
+        # This includes the root page and all pages at degrees <= current degree
+        seen_pages = {root_page_id}
+        
+        # Query all pages that have been crawled at degrees <= current degree
+        # We'll exclude pages that are already at a lower degree (closer to root)
+        for neighbor_id in neighbor_ids:
+            # Check if already queued, running, or done
+            existing_status = await pool.fetchval(
+                "SELECT status FROM page_fetch WHERE page_id = $1", 
+                neighbor_id
             )
-            logger.info(f"Enqueued first-degree neighbor {first_degree_id} as separate job")
+            
+            # Check if this page was already crawled at a lower degree (closer to root)
+            existing_cursor = await pool.fetchval(
+                "SELECT last_cursor FROM page_fetch WHERE page_id = $1",
+                neighbor_id
+            )
+            should_enqueue = True
+            
+            if existing_cursor:
+                try:
+                    existing_cursor_data = json.loads(existing_cursor) if isinstance(existing_cursor, str) else existing_cursor
+                    existing_degree = existing_cursor_data.get("degree", 999)  # Default to high number if not set
+                    if existing_degree < degree + 1:
+                        # This page was already crawled at a lower degree, skip it
+                        should_enqueue = False
+                except:
+                    pass
+            
+            # Only enqueue if not already done/running and not seen at lower degree
+            if should_enqueue and existing_status != 'done' and existing_status != 'running':
+                cursor_data = {
+                    "link_direction": "outbound",  # Will crawl both directions
+                    "crawl_with_neighbors": False,  # Processed by worker, not recursively
+                    "degree": degree + 1,  # Track degree level
+                    "root_page_id": root_page_id  # Track which root this belongs to
+                }
+                await pool.execute(
+                    """
+                    INSERT INTO page_fetch (page_id, status, priority, last_cursor, requested_by)
+                    VALUES ($1, 'queued', 0, $2::jsonb, $3)
+                    ON CONFLICT (page_id) DO UPDATE SET
+                      status = CASE 
+                        WHEN page_fetch.status = 'running' THEN page_fetch.status
+                        WHEN page_fetch.status = 'done' THEN page_fetch.status
+                        ELSE 'queued'
+                      END,
+                      last_cursor = COALESCE(excluded.last_cursor, page_fetch.last_cursor)
+                    """,
+                    neighbor_id, 
+                    json.dumps(cursor_data),
+                    f"degree_{degree + 1}_of_{root_page_id}"
+                )
+                logger.info(f"Enqueued neighbor {neighbor_id} at degree {degree + 1} (root: {root_page_id})")
+    else:
+        logger.info(f"Reached MAX_DEGREE ({settings.MAX_DEGREE}), not enqueueing neighbors for page {initial_page_id}")
     
-    # Step 4: Mark initial page as done (first-degree neighbors will be processed by crawler loop)
+    # Step 3: Mark this page as done
     await mark_done(pool, initial_page_id)
-    logger.info(f"Completed initial page {initial_page_id}: enqueued {len(first_degree_ids)} first-degree neighbors")
+    logger.info(f"Completed page {initial_page_id} at degree {degree}: enqueued neighbors up to degree {min(degree + 1, settings.MAX_DEGREE)}")
 
 async def crawler_loop(stop_event: asyncio.Event):
     import logging
@@ -416,65 +450,34 @@ async def crawler_loop(stop_event: asyncio.Event):
                 
                 try:
                         if crawl_with_neighbors_flag:
-                            # Use new orchestration function (it handles marking done internally)
-                            await crawl_with_neighbors(pool, page_id)
+                            # Root page - start recursive crawling at degree 0
+                            await crawl_with_neighbors(pool, page_id, degree=0)
                             # Double-check it was marked as done
                             final_status = await pool.fetchval("SELECT status FROM page_fetch WHERE page_id = $1", page_id)
                             if final_status == 'running':
                                 logger.warning(f"Job {page_id} still running after crawl_with_neighbors, marking as done")
                                 await mark_done(pool, page_id)
                         else:
-                            # Check if this is a first-degree neighbor job that needs to discover second-degree nodes
-                            is_first_degree_of = None
+                            # Check if this is a neighbor job at a specific degree
+                            degree = None
+                            root_page_id = None
                             if cursor_json:
                                 try:
                                     cursor = json.loads(cursor_json) if isinstance(cursor_json, str) else cursor_json
-                                    is_first_degree_of = cursor.get("is_first_degree_of")
+                                    degree = cursor.get("degree")
+                                    root_page_id = cursor.get("root_page_id")
                                 except:
                                     pass
                             
-                            if is_first_degree_of:
-                                # This is a first-degree neighbor job - crawl it and discover second-degree nodes
-                                logger.info(f"Processing first-degree neighbor {page_id} of initial page {is_first_degree_of}")
-                                await crawl_both_directions(pool, page_id)
-                                
-                                # Discover second-degree nodes (connected to this first-degree neighbor, but not the initial page or other first-degree neighbors)
-                                # Get all first-degree neighbors of the initial page
-                                initial_outbound = await pool.fetch(
-                                    "SELECT to_page_id FROM links WHERE from_page_id = $1", is_first_degree_of
-                                )
-                                initial_inbound = await pool.fetch(
-                                    "SELECT from_page_id FROM links WHERE to_page_id = $1", is_first_degree_of
-                                )
-                                first_degree_set = {is_first_degree_of}  # Include initial page
-                                for row in initial_outbound:
-                                    first_degree_set.add(row['to_page_id'])
-                                for row in initial_inbound:
-                                    first_degree_set.add(row['from_page_id'])
-                                
-                                # Get all connections of this first-degree neighbor
-                                neighbor_outbound = await pool.fetch(
-                                    "SELECT to_page_id FROM links WHERE from_page_id = $1", page_id
-                                )
-                                neighbor_inbound = await pool.fetch(
-                                    "SELECT from_page_id FROM links WHERE to_page_id = $1", page_id
-                                )
-                                
-                                second_degree = set()
-                                for row in neighbor_outbound:
-                                    connected_id = row['to_page_id']
-                                    if connected_id not in first_degree_set:
-                                        second_degree.add(connected_id)
-                                for row in neighbor_inbound:
-                                    connected_id = row['from_page_id']
-                                    if connected_id not in first_degree_set:
-                                        second_degree.add(connected_id)
-                                
-                                # Mark second-degree nodes as discovered
-                                if second_degree:
-                                    second_degree_list = list(second_degree)
-                                    logger.info(f"Discovered {len(second_degree_list)} second-degree nodes from first-degree neighbor {page_id}")
-                                    await mark_as_discovered(pool, second_degree_list, f"discovered_from_first_degree_{page_id}")
+                            if degree is not None and root_page_id is not None:
+                                # This is a neighbor job at a specific degree - recursively crawl it
+                                logger.info(f"Processing page {page_id} at degree {degree} (root: {root_page_id})")
+                                await crawl_with_neighbors(pool, page_id, degree=degree, root_page_id=root_page_id)
+                                # Double-check it was marked as done
+                                final_status = await pool.fetchval("SELECT status FROM page_fetch WHERE page_id = $1", page_id)
+                                if final_status == 'running':
+                                    logger.warning(f"Job {page_id} still running after crawl_with_neighbors, marking as done")
+                                    await mark_done(pool, page_id)
                             else:
                                 # Regular single-direction crawl
                                 await crawl_one_page(pool, page_id, link_direction)

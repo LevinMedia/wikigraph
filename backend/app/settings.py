@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     MAX_LINKS_PER_PAGE: int = 0  # 0 = unlimited (ALL links)
     ALLOW_NAMESPACES: str = "0"  # comma-separated
     USER_AGENT: str = "WikiGraphExplorer/0.1"
+    MAX_DEGREE: int = 6  # Maximum degree of separation to crawl (0 = initial page, 1-6 = neighbor degrees)
 
     class Config:
         env_file = str(BACKEND_DIR / ".env")

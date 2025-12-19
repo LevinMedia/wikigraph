@@ -6,6 +6,25 @@ import { OrbitControls, Text } from '@react-three/drei'
 import * as THREE from 'three'
 import { GraphNode, GraphEdge } from '@/lib/api'
 
+// Atmospheric fog component for vignette effect
+function AtmosphericFog() {
+  const { scene } = useThree()
+  
+  useEffect(() => {
+    // Add exponential fog for atmospheric haze/vignette effect
+    // Exponential fog creates a more natural fade-out
+    const fog = new THREE.FogExp2('#000000', 0.015) // Dark fog, density controls fade distance
+    scene.fog = fog
+    
+    return () => {
+      // Cleanup fog when component unmounts
+      scene.fog = null
+    }
+  }, [scene])
+  
+  return null
+}
+
 interface GraphVisualizationProps {
   data: {
     center_page_id: number
@@ -130,19 +149,300 @@ function AutoRotatingOrbitControls({
   )
 }
 
+// Pulse component that moves along an edge
+function EdgePulse({
+  fromPos,
+  toPos,
+  color,
+  direction,
+  offset = 0,
+  speed = 0.5, // 100% slower (half speed)
+  pingPong = false,
+  radius = 0.03 // Default pulse radius (reduced for subtler effect)
+}: {
+  fromPos: [number, number, number]
+  toPos: [number, number, number]
+  color: string
+  direction: 'forward' | 'backward'
+  offset?: number
+  speed?: number
+  pingPong?: boolean
+  radius?: number
+}) {
+  const pulseRef = useRef<THREE.Group>(null)
+  const meshRef = useRef<THREE.Mesh>(null)
+  const progressRef = useRef(offset)
+  const pingPongDirectionRef = useRef(1) // 1 for forward, -1 for backward
+  const startTimeRef = useRef<number | null>(null)
+  const cycleTimeRef = useRef(0)
+  const fadeOpacityRef = useRef(1.0) // Track fade in/out opacity
+  
+  // Calculate edge vector and length
+  const edgeVector = useMemo(() => {
+    return new THREE.Vector3(...toPos).sub(new THREE.Vector3(...fromPos))
+  }, [fromPos, toPos])
+  
+  const edgeLength = useMemo(() => {
+    return edgeVector.length()
+  }, [edgeVector])
+  
+  // Pulse cycle duration: pulse visible for 3 seconds, then 5 second wait before next pulse
+  // For one-way pulses: need time for grow (1s) + travel (1s) + shrink (1s) = 3 seconds at speed 0.5
+  // Set visible duration to exactly match the pulse cycle time to prevent flash
+  const cycleDuration = 8.0 // seconds per cycle (3s visible + 5s wait)
+  const visibleDuration = 3.0 // visible for exactly the time needed to complete full one-way cycle (grow + travel + shrink)
+  
+  // Pulse length as a fraction of edge length - half the edge length
+  const pulseLengthFraction = 0.5 // 50% of edge length
+  
+  useFrame((state, delta) => {
+    if (pulseRef.current) {
+      // Initialize start time on first frame
+      if (startTimeRef.current === null) {
+        startTimeRef.current = state.clock.elapsedTime
+      }
+      
+      const elapsed = state.clock.elapsedTime - startTimeRef.current
+      cycleTimeRef.current = elapsed % cycleDuration
+      
+      // Only show pulse during visible portion of cycle (1/3 of the time)
+      const isVisible = cycleTimeRef.current < visibleDuration
+      pulseRef.current.visible = isVisible
+      
+      if (!isVisible) {
+        // Reset progress when pulse becomes invisible, so it starts fresh next cycle
+        progressRef.current = offset
+        pingPongDirectionRef.current = 1
+        return
+      }
+      
+      // Reset progress at start of each visible cycle
+      const wasInvisible = cycleTimeRef.current - delta < 0 || (cycleTimeRef.current - delta >= visibleDuration && cycleTimeRef.current < visibleDuration)
+      if (wasInvisible) {
+        progressRef.current = offset
+        pingPongDirectionRef.current = 1
+      }
+      
+      if (pingPong) {
+        // Ping-pong mode: bounce back and forth from origin
+        // Double the speed so round trip (0->1->0) takes same time as one-way (0->1)
+        const pingPongSpeed = speed * 2.0
+        progressRef.current += delta * pingPongSpeed * pingPongDirectionRef.current
+        if (progressRef.current >= 1) {
+          progressRef.current = 1
+          pingPongDirectionRef.current = -1 // Reverse direction (bounce back)
+        } else if (progressRef.current <= 0) {
+          progressRef.current = 0
+          pingPongDirectionRef.current = 1 // Reverse direction (bounce forward)
+        }
+      } else {
+        // Normal mode: travel in one direction
+        // Allow progress to go beyond 1.0 so pulse can shrink at the end
+        progressRef.current += delta * speed
+        // Only reset when pulse has fully disappeared (after shrinking phase)
+        // Pulse shrinks from t=1.0 to t=1.0+maxPulseLength, so reset after that
+        const maxPulseLength = 0.5
+        if (progressRef.current > 1.0 + maxPulseLength) {
+          progressRef.current = 0
+        }
+      }
+      
+      const t = direction === 'forward' ? progressRef.current : 1 - progressRef.current
+      
+      // Pulse should grow from the source node
+      // Maximum pulse length is 50% of edge
+      const maxPulseLength = 0.5 // 50% of edge length
+      
+      // Calculate pulse start and end positions
+      let pulseStart = 0
+      let pulseEnd = 0
+      
+      // Growth phase: pulse starts at source (0) and grows as it travels
+      if (t <= maxPulseLength) {
+        pulseStart = 0
+        pulseEnd = t // Grow from 0 to maxPulseLength
+      }
+      // Travel phase: pulse maintains max length and travels
+      else if (t <= 1.0) {
+        pulseStart = t - maxPulseLength
+        pulseEnd = t // Leading edge travels toward target
+      }
+      // Shrink phase: leading edge stops at target (1.0), tail catches up
+      else {
+        // Leading edge is fixed at target node (1.0)
+        pulseEnd = 1.0
+        // Tail continues forward, shrinking the pulse
+        // When t = 1.0, pulseStart = 1.0 - maxPulseLength (full length)
+        // As t increases beyond 1.0, pulseStart increases toward 1.0 (shrinking)
+        pulseStart = Math.min(1.0, t - maxPulseLength)
+      }
+      
+      // Clamp to edge boundaries
+      pulseStart = Math.max(0, pulseStart)
+      pulseEnd = Math.min(1, pulseEnd)
+      
+      // Calculate actual pulse center and length after clamping
+      const clampedPulseCenter = (pulseStart + pulseEnd) / 2
+      const clampedPulseLength = pulseEnd - pulseStart
+      
+      // Position pulse at clamped center
+      const pos = new THREE.Vector3().lerpVectors(
+        new THREE.Vector3(...fromPos),
+        new THREE.Vector3(...toPos),
+        clampedPulseCenter
+      )
+      pulseRef.current.position.copy(pos)
+      
+      // Scale pulse length to match clamped length (will shrink to 0 as tail reaches end)
+      if (meshRef.current) {
+        meshRef.current.scale.y = clampedPulseLength / maxPulseLength // Scale factor
+      }
+      
+      // Calculate fade in opacity only (no fade out - pulse just shrinks)
+      // 300ms fade time at speed 0.5: full edge takes 2 seconds, so 300ms = 0.3/2.0 = 0.15 of progress
+      const fadeTime = 0.3 // 300ms in seconds
+      const fullEdgeTime = 1.0 / speed // Time to travel full edge (2 seconds at speed 0.5)
+      const fadeProgress = fadeTime / fullEdgeTime // Fraction of progress for fade (0.15)
+      
+      let fadeOpacity = 1.0
+      // Fade in: when pulse is just starting (leading edge is near 0)
+      // Use pulseEnd (leading edge) for fade-in since that's what's visible
+      if (pulseEnd < fadeProgress) {
+        fadeOpacity = pulseEnd / fadeProgress
+      }
+      // No fade out - pulse just gets shorter until it disappears
+      
+      fadeOpacityRef.current = fadeOpacity
+      
+      // Update material opacity uniform
+      if (gradientMaterial.current) {
+        gradientMaterial.current.uniforms.fadeOpacity.value = fadeOpacity
+      }
+      
+      // Orient the pulse along the edge direction
+      const normalizedEdge = edgeVector.clone().normalize()
+      if (normalizedEdge.length() > 0) {
+        // Create a quaternion to rotate from Y-axis (cylinder default) to edge direction
+        const yAxis = new THREE.Vector3(0, 1, 0)
+        const quaternion = new THREE.Quaternion().setFromUnitVectors(yAxis, normalizedEdge)
+        pulseRef.current.quaternion.copy(quaternion)
+      }
+    }
+  })
+  
+  // Slightly brighten the color for the pulse effect (toned down)
+  const brightColor = useMemo(() => {
+    const c = new THREE.Color(color)
+    c.multiplyScalar(1.2) // Subtle brightness increase
+    return c
+  }, [color])
+  
+  // Pulse length as a fraction of edge length - half the edge length
+  const pulseLength = edgeLength * 0.5 // 50% of edge length (will be scaled dynamically)
+  
+  // Create shader material with gradient fade at ends
+  const gradientMaterial = useRef<THREE.ShaderMaterial | null>(null)
+  const material = useMemo(() => {
+    const halfLength = pulseLength / 2
+    const mat = new THREE.ShaderMaterial({
+      uniforms: {
+        color: { value: new THREE.Color(brightColor) },
+        opacity: { value: 0.6 }, // Reduced opacity for subtler effect
+        fadeOpacity: { value: 1.0 }, // Fade in/out opacity (0 to 1)
+        halfLength: { value: halfLength }
+      },
+      vertexShader: `
+        varying float vPositionY;
+        void main() {
+          vPositionY = position.y;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform vec3 color;
+        uniform float opacity;
+        uniform float fadeOpacity;
+        uniform float halfLength;
+        varying float vPositionY;
+        
+        void main() {
+          // Normalize position along Y axis (-halfLength to +halfLength)
+          // Map to 0.0 to 1.0 range
+          float normalizedY = (vPositionY + halfLength) / (halfLength * 2.0);
+          
+          // Dramatic gradient - only middle 20% is fully solid
+          // Much more dramatic fade at both ends
+          float centerStart = 0.4; // Start of solid center (40%)
+          float centerEnd = 0.6;    // End of solid center (60%)
+          
+          float fade = 1.0;
+          if (normalizedY < centerStart) {
+            // Dramatic fade in from start - very sharp transition
+            fade = smoothstep(0.0, centerStart, normalizedY);
+            // Make it even more dramatic by squaring
+            fade = fade * fade;
+          } else if (normalizedY > centerEnd) {
+            // Dramatic fade out at end - very sharp transition
+            fade = smoothstep(1.0, centerEnd, normalizedY);
+            // Make it even more dramatic by squaring
+            fade = fade * fade;
+          }
+          // Middle section (centerStart to centerEnd) stays at fade = 1.0
+          
+          // Calculate final opacity with fade
+          float finalOpacity = opacity * fade * fadeOpacity;
+          
+          // Add glow effect by making the color brighter and more emissive
+          // The glow intensity is stronger in the center and fades at edges
+          float glowIntensity = fade * fadeOpacity;
+          vec3 glowColor = color * (1.0 + glowIntensity * 2.0); // Brighten for glow
+          
+          // Output with glow effect
+          gl_FragColor = vec4(glowColor, finalOpacity);
+        }
+      `,
+      transparent: true,
+      depthWrite: false, // Don't write to depth buffer to prevent blocking edges behind
+      depthTest: true, // Still test depth to respect other objects
+      side: THREE.DoubleSide
+    })
+    gradientMaterial.current = mat
+    return mat
+  }, [brightColor, pulseLength])
+  
+  return (
+    <group ref={pulseRef} renderOrder={-1}>
+      <mesh ref={meshRef} renderOrder={-1}>
+        <cylinderGeometry args={[radius, radius, pulseLength, 16, 1]} />
+        <primitive object={material} attach="material" />
+      </mesh>
+    </group>
+  )
+}
+
 // Edge component with smooth opacity and color transitions
 function Edge3D({ 
   fromPos, 
   toPos, 
   color, 
   targetOpacity, 
-  isHighlighted 
-}: { 
+  isHighlighted,
+  pulseColor,
+  pulseDirection,
+  centerPos,
+  pulseRadius,
+  onDeselect
+}: {
   fromPos: [number, number, number]
   toPos: [number, number, number]
   color: string
   targetOpacity: number
   isHighlighted: boolean
+  pulseColor?: string
+  pulseDirection?: 'forward' | 'backward' | 'both'
+  centerPos?: [number, number, number]
+  pulseRadius?: number
+  onDeselect?: () => void
 }) {
   const materialRef = useRef<THREE.LineBasicMaterial>(null)
   const currentOpacityRef = useRef(targetOpacity) // Initialize to target opacity
@@ -160,7 +460,7 @@ function Edge3D({
   
   useFrame(() => {
     if (materialRef.current) {
-      const lerpFactor = 0.15 // Match node and label transition speed
+      const lerpFactor = 0.075 // Twice as long transitions (half the speed)
       
       // Smoothly transition color
       currentColorRef.current.lerp(targetColorRef.current, lerpFactor)
@@ -173,23 +473,88 @@ function Edge3D({
   })
   
   return (
-    <line>
-      <bufferGeometry>
-        <bufferAttribute
-          attach="attributes-position"
-          count={2}
-          array={new Float32Array([...fromPos, ...toPos])}
-          itemSize={3}
+    <group>
+      <line
+        onClick={(e) => {
+          // Clicking on edges should also deselect nodes
+          e.stopPropagation()
+          if (onDeselect) {
+            onDeselect()
+          }
+        }}
+      >
+        <bufferGeometry>
+          <bufferAttribute
+            attach="attributes-position"
+            count={2}
+            array={new Float32Array([...fromPos, ...toPos])}
+            itemSize={3}
+          />
+        </bufferGeometry>
+        <lineBasicMaterial 
+          ref={materialRef}
+          color={currentColorRef.current} 
+          opacity={currentOpacityRef.current}
+          transparent={true}
+          linewidth={isHighlighted ? 2 : 1}
         />
-      </bufferGeometry>
-      <lineBasicMaterial 
-        ref={materialRef}
-        color={currentColorRef.current} 
-        opacity={currentOpacityRef.current}
-        transparent={true}
-        linewidth={isHighlighted ? 2 : 1}
-      />
-    </line>
+      </line>
+      {/* Pulse animation when highlighted */}
+      {isHighlighted && pulseColor && pulseDirection && (() => {
+        if (pulseDirection === 'both') {
+          // For two-way, render two one-way pulses going in opposite directions
+          // Determine which position is the center and which is the node
+          let centerPulseFrom = fromPos
+          let centerPulseTo = toPos
+          let nodePulseFrom = toPos
+          let nodePulseTo = fromPos
+          
+          if (centerPos) {
+            const isFromCenter = Math.abs(fromPos[0] - centerPos[0]) < 0.01 && 
+                                 Math.abs(fromPos[1] - centerPos[1]) < 0.01 && 
+                                 Math.abs(fromPos[2] - centerPos[2]) < 0.01
+            if (!isFromCenter) {
+              // Swap positions so center pulse goes from center to node
+              centerPulseFrom = toPos
+              centerPulseTo = fromPos
+              nodePulseFrom = fromPos
+              nodePulseTo = toPos
+            }
+          }
+          
+          return (
+            <>
+              {/* Pulse from center to node */}
+              <EdgePulse 
+                fromPos={centerPulseFrom} 
+                toPos={centerPulseTo} 
+                color={pulseColor} 
+                direction="forward"
+                radius={pulseRadius}
+              />
+              {/* Pulse from node to center */}
+              <EdgePulse 
+                fromPos={nodePulseFrom} 
+                toPos={nodePulseTo} 
+                color={pulseColor} 
+                direction="forward"
+                radius={pulseRadius}
+              />
+            </>
+          )
+        } else {
+          return (
+            <EdgePulse 
+              fromPos={fromPos} 
+              toPos={toPos} 
+              color={pulseColor} 
+              direction={pulseDirection}
+              radius={pulseRadius}
+            />
+          )
+        }
+      })()}
+    </group>
   )
 }
 
@@ -330,25 +695,21 @@ function GraphNode3D({
     targetColorRef.current.set(baseColor)
   }, [node.is_center, baseColor])
   
-  // Make color brighter on hover, selection, or when part of the mesh (for 1st degree nodes)
+  // Make color brighter only on hover/selection (not for mesh nodes)
   const isHighlighted = ((isHovered || isSelected || isInMesh) && isFirstDegree)
   const isHoveredOrSelected = (isHovered || isSelected) && isFirstDegree
   
   // Calculate target color
   let targetColorStr = baseColor
   if (isHoveredOrSelected) {
-    // Very light yellow for hovered/selected node
-    targetColorStr = '#fef9c3' // Very light yellow
-  } else if (isInMesh && isFirstDegree) {
-    // Use relationship type color but slightly brighter for mesh nodes
-    targetColorStr = relationshipType === 'Two way'
-      ? '#5ed5d5' // Brighter cyan
-      : relationshipType === 'Inbound'
-        ? '#9d6df7' // Brighter purple
-        : relationshipType === 'Outbound'
-          ? '#c4b5fd' // Brighter light purple
-          : baseColor
+    // Brighten the original color by mixing with white (only for selected/hovered node)
+    const baseColorObj = new THREE.Color(baseColor)
+    const white = new THREE.Color(0xffffff)
+    // Mix 40% white with 60% original color for a bright but still colorful version
+    baseColorObj.lerp(white, 0.4)
+    targetColorStr = '#' + baseColorObj.getHexString()
   }
+  // Mesh nodes (isInMesh) keep their base color - no brightening
   
   // Update target color
   targetColorRef.current.set(targetColorStr)
@@ -362,12 +723,14 @@ function GraphNode3D({
   const shouldShowLabel = node.is_center || ((isHovered || isSelected || isInMesh) && isFirstDegree)
   const targetLabelOpacity = shouldShowLabel ? 1.0 : 0.0
   
-  // Reduce emissive intensity when opacity is reduced - remove emissive entirely when faded
-  const baseEmissiveIntensity = isHighlighted ? 0.4 : 0.15
+  // Emissive intensity: subtle glow for all nodes, brighter for hovered/selected
+  // Base glow intensity for all nodes in their relationship color
+  const baseGlowIntensity = 0.2 // Subtle glow for all nodes
+  const baseEmissiveIntensity = isHoveredOrSelected ? 0.4 : baseGlowIntensity
   
   // Smoothly transition color, opacity, and label using useFrame
   useFrame(() => {
-    const lerpFactor = 0.15 // Adjust this for faster/slower transitions
+    const lerpFactor = 0.075 // Twice as long transitions (half the speed)
     
     if (materialRef.current) {
       // Smoothly transition color
@@ -379,17 +742,16 @@ function GraphNode3D({
       materialRef.current.opacity = currentOpacityRef.current
       
       // Also smoothly transition emissive intensity
-      const targetEmissiveIntensity = targetOpacityRef.current < 1.0 ? 0 : baseEmissiveIntensity
+      // When faded, reduce glow but keep subtle glow; when normal, use base glow intensity
+      const targetEmissiveIntensity = targetOpacityRef.current < 1.0 
+        ? baseGlowIntensity * 0.1 // Very subtle glow when faded
+        : baseEmissiveIntensity // Normal glow intensity
       const currentEmissive = materialRef.current.emissiveIntensity || 0
       const newEmissive = currentEmissive + (targetEmissiveIntensity - currentEmissive) * lerpFactor
       materialRef.current.emissiveIntensity = newEmissive
       
-      // Update emissive color smoothly
-      if (targetOpacityRef.current < 1.0) {
-        materialRef.current.emissive.set('#000000')
-      } else {
-        materialRef.current.emissive.copy(currentColorRef.current)
-      }
+      // Update emissive color smoothly - always use node color for glow
+      materialRef.current.emissive.copy(currentColorRef.current)
     }
     
     // Smoothly transition label opacity
@@ -692,14 +1054,34 @@ export default function GraphVisualization({ data, onNodeClick, onNodeSelect, re
   }
   
   // Get animation start time for a node
+  // Ensure total animation completes within 3 seconds regardless of node count
   const getAnimationStartTime = useCallback((nodeId: number): number | undefined => {
     if (animationStartTimeRef.current === null) {
       return undefined // Not initialized yet
     }
     
     const animationIndex = animationOrder.get(nodeId) ?? 0
-    const delayBetweenNodes = 0.05 // 50ms between each node
-    const startTime = animationStartTimeRef.current + (animationIndex * delayBetweenNodes)
+    
+    // Center node (index 0) starts immediately
+    if (animationIndex === 0) {
+      return animationStartTimeRef.current
+    }
+    
+    // Calculate delay to ensure all animations complete within 3 seconds
+    const animationDuration = 0.8 // 800ms for each node animation
+    const totalAnimationWindow = 3.0 // 3 seconds total
+    const maxStartTime = totalAnimationWindow - animationDuration // Last node must start by this time
+    
+    // Count total nodes to animate (excluding center)
+    const totalNodesToAnimate = animationOrder.size - 1 // Exclude center node
+    
+    // Calculate delay between nodes to fit within the window
+    // If only one node, start immediately; otherwise distribute evenly
+    const delayBetweenNodes = totalNodesToAnimate > 1 
+      ? maxStartTime / (totalNodesToAnimate - 1)
+      : 0
+    
+    const startTime = animationStartTimeRef.current + (animationIndex - 1) * delayBetweenNodes
     
     return startTime
   }, [animationOrder])
@@ -734,7 +1116,8 @@ export default function GraphVisualization({ data, onNodeClick, onNodeSelect, re
     })
     
     // Now filter edges: show edges to/from center if visible, and show edges between visible nodes
-    return edges.filter(edge => {
+    // For two-way connections, only show one edge (prefer center->node direction)
+    const processedEdges = edges.filter(edge => {
       const isFromCenter = edge.from === centerId
       const isToCenter = edge.to === centerId
       
@@ -750,6 +1133,54 @@ export default function GraphVisualization({ data, onNodeClick, onNodeSelect, re
       
       // For edges between non-center nodes, show them if BOTH endpoints are visible
       return visibleNodeIds.has(edge.from) && visibleNodeIds.has(edge.to)
+    })
+    
+    // Deduplicate two-way edges: for two-way connections, only keep the center->node edge
+    const seenTwoWay = new Set<string>()
+    return processedEdges.filter(edge => {
+      const isFromCenter = edge.from === centerId
+      const isToCenter = edge.to === centerId
+      
+      if (isFromCenter || isToCenter) {
+        const isTwoWay = isFromCenter && edges.some(e => e.from === edge.to && e.to === centerId) ||
+                         isToCenter && edges.some(e => e.from === centerId && e.to === edge.from)
+        
+        if (isTwoWay) {
+          // Create a unique key for this two-way connection (use both node IDs, sorted)
+          const nodeId = isFromCenter ? edge.to : edge.from
+          const key = `${Math.min(centerId, nodeId)}-${Math.max(centerId, nodeId)}`
+          
+          // Only keep the edge that goes FROM center TO node
+          if (isFromCenter) {
+            seenTwoWay.add(key)
+            return true
+          } else {
+            // Skip the reverse edge if we've already seen the forward edge
+            return !seenTwoWay.has(key)
+          }
+        }
+      }
+      
+      // For edges not involving center, check if they're two-way and deduplicate
+      // Check if this edge has a reverse edge (making it two-way)
+      const hasReverse = edges.some(e => e.from === edge.to && e.to === edge.from)
+      
+      if (hasReverse) {
+        // Two-way edge between non-center nodes - only keep one direction
+        // Use the edge with the smaller from ID to ensure consistency
+        const key = `${Math.min(edge.from, edge.to)}-${Math.max(edge.from, edge.to)}`
+        
+        if (edge.from < edge.to) {
+          // Keep the edge with smaller from ID
+          seenTwoWay.add(key)
+          return true
+        } else {
+          // Skip the reverse edge if we've already seen the forward edge
+          return !seenTwoWay.has(key)
+        }
+      }
+      
+      return true
     })
   }, [edges, relationshipFilters, data.center_page_id])
   
@@ -830,18 +1261,33 @@ export default function GraphVisualization({ data, onNodeClick, onNodeSelect, re
       camera={{ position: [0, 0, 25], fov: 50 }}
       shadows
     >
+      <AtmosphericFog />
       <AnimationInitializer />
       
       {/* Invisible background plane to catch clicks outside nodes */}
+      {/* Position it behind everything and make it very large to catch all clicks */}
       <mesh 
-        position={[0, 0, -50]}
+        position={[0, 0, -100]}
         onClick={(e) => {
           e.stopPropagation()
           setSelectedNodeId(null)
+          if (onNodeSelect) {
+            onNodeSelect(null)
+          }
         }}
+        onPointerDown={(e) => {
+          // Also handle pointer down for more reliable detection
+          e.stopPropagation()
+        }}
+        renderOrder={-999} // Render first so it's behind everything
       >
-        <planeGeometry args={[1000, 1000]} />
-        <meshBasicMaterial transparent opacity={0} />
+        <planeGeometry args={[5000, 5000]} />
+        <meshBasicMaterial 
+          transparent 
+          opacity={0} 
+          depthWrite={false}
+          depthTest={false} // Don't test depth so it always catches clicks
+        />
       </mesh>
       
       {/* Ambient light for overall illumination */}
@@ -891,13 +1337,82 @@ export default function GraphVisualization({ data, onNodeClick, onNodeSelect, re
         const highlightedNodes = getHighlightedNodes()
         const isMeshActive = highlightedNodes.size > 0
         
+        // Check if this is an edge between first-degree nodes (not involving center)
+        const isFromCenter = edge.from === data.center_page_id
+        const isToCenter = edge.to === data.center_page_id
+        const isBetweenFirstDegree = firstDegreeNodes.has(edge.from) && firstDegreeNodes.has(edge.to) && !isFromCenter && !isToCenter
+        
         // Reduce opacity for edges not in the mesh when mesh is active
         let edgeOpacity = isHighlighted ? 0.8 : 0.3
         if (isMeshActive && !isHighlighted) {
           edgeOpacity = 0.1 // Very low opacity for non-mesh edges when mesh is active
         }
         
+        // Reduce contrast for edges between first-degree nodes - make them more transparent
+        if (isBetweenFirstDegree) {
+          edgeOpacity *= 0.4 // Reduce opacity by 60% for much less contrast
+        }
+        
         const edgeColor = isHighlighted ? '#eaf0ff' : '#4a5568'
+        
+        // Determine pulse color and direction based on relationship type
+        // Use the same logic as node coloring to ensure consistency
+        let pulseColor: string | undefined
+        let pulseDirection: 'forward' | 'backward' | 'both' | undefined
+        let pulseRadius: number | undefined // Optional custom radius for pulses
+        
+        if (isHighlighted) {
+          // isBetweenFirstDegree already calculated above
+          
+          if (isFromCenter || isToCenter) {
+            // Edge connects to center - determine relationship type using ALL edges
+            let relationshipType: 'Two way' | 'Inbound' | 'Outbound' | null = null
+            
+            if (isFromCenter) {
+              // Edge goes from center to node - check if reverse edge exists
+              const hasReverse = edges.some(e => e.from === edge.to && e.to === data.center_page_id)
+              relationshipType = hasReverse ? 'Two way' : 'Outbound'
+            } else if (isToCenter) {
+              // Edge goes from node to center - check if reverse edge exists
+              const hasReverse = edges.some(e => e.from === data.center_page_id && e.to === edge.from)
+              relationshipType = hasReverse ? 'Two way' : 'Inbound'
+            }
+            
+            if (relationshipType === 'Two way') {
+              // Two-way: teal/cyan pulse in both directions
+              pulseColor = '#4ecdc4'
+              pulseDirection = 'both'
+            } else if (relationshipType === 'Outbound') {
+              // Outbound: light purple pulse from center to node
+              pulseColor = '#a78bfa'
+              pulseDirection = 'forward'
+            } else if (relationshipType === 'Inbound') {
+              // Inbound: darker purple pulse from node to center
+              pulseColor = '#8b5cf6'
+              pulseDirection = 'forward'
+            }
+          } else if (isBetweenFirstDegree) {
+            // Edge between two first-degree nodes (not involving center)
+            // Use dim white pulses to maintain color cardinality relative to center node
+            // Check if it's two-way
+            const hasReverse = edges.some(e => e.from === edge.to && e.to === edge.from)
+            
+            if (hasReverse) {
+              // Two-way between first-degree nodes: very dim white pulses in both directions
+              pulseColor = '#555555' // Even dimmer white/gray for less brightness
+              pulseDirection = 'both'
+              pulseRadius = 0.03 // Smaller radius for white pulses
+            } else {
+              // One-way between first-degree nodes: very dim white pulse
+              pulseColor = '#555555' // Even dimmer white/gray for less brightness
+              pulseDirection = 'forward'
+              pulseRadius = 0.03 // Smaller radius for white pulses
+            }
+          }
+        }
+        
+        // Get center position for two-way pulse orientation
+        const centerPos = nodePositions.get(data.center_page_id)
         
         return (
           <Edge3D
@@ -907,6 +1422,16 @@ export default function GraphVisualization({ data, onNodeClick, onNodeSelect, re
             color={edgeColor}
             targetOpacity={edgeOpacity}
             isHighlighted={isHighlighted}
+            pulseColor={pulseColor}
+            pulseDirection={pulseDirection}
+            centerPos={centerPos}
+            pulseRadius={pulseRadius}
+            onDeselect={() => {
+              setSelectedNodeId(null)
+              if (onNodeSelect) {
+                onNodeSelect(null)
+              }
+            }}
           />
         )
       })}
@@ -933,10 +1458,11 @@ export default function GraphVisualization({ data, onNodeClick, onNodeSelect, re
           const isSelected = selectedNodeId === node.page_id
           
           // Determine relationship type with center node
+          // Use ALL edges (not filtered) to get accurate relationship type regardless of filters
           let relationshipType: 'Two way' | 'Inbound' | 'Outbound' | null = null
           if (isFirstDegree && !node.is_center) {
-            const hasOutbound = filteredEdges.some(e => e.from === data.center_page_id && e.to === node.page_id)
-            const hasInbound = filteredEdges.some(e => e.to === data.center_page_id && e.from === node.page_id)
+            const hasOutbound = edges.some(e => e.from === data.center_page_id && e.to === node.page_id)
+            const hasInbound = edges.some(e => e.to === data.center_page_id && e.from === node.page_id)
             
             if (hasOutbound && hasInbound) {
               relationshipType = 'Two way'
