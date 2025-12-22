@@ -108,3 +108,120 @@ async def fetch_all_backlinks(page_id: int, allow_namespaces: set[int]) -> Tuple
 
     return out, None
 
+async def fetch_page_extract(page_id: int) -> str:
+    """
+    Fetch full text extract for a page_id.
+    Uses prop=extracts with exintro=false to get full text, explaintext=true for plain text.
+    """
+    data = await api_get({
+        "action": "query",
+        "format": "json",
+        "pageids": str(page_id),
+        "prop": "extracts",
+        "exintro": "false",  # Get full text, not just intro
+        "explaintext": "true"  # Plain text, no HTML
+    })
+    pages = data.get("query", {}).get("pages", {})
+    page = pages.get(str(page_id), {})
+    extract = page.get("extract", "")
+    return extract
+
+async def fetch_page_categories(page_id: int) -> list[str]:
+    """
+    Fetch categories for a page_id.
+    Returns list of category names (without "Category:" prefix).
+    """
+    cont = None
+    categories: list[str] = []
+    
+    while True:
+        params = {
+            "action": "query",
+            "format": "json",
+            "pageids": str(page_id),
+            "prop": "categories",
+            "cllimit": "max",
+        }
+        if cont:
+            params.update(cont)
+        
+        data = await api_get(params)
+        pages = data.get("query", {}).get("pages", {})
+        page = pages.get(str(page_id), {})
+        cats = page.get("categories", []) or []
+        
+        for cat in cats:
+            title = cat.get("title", "")
+            # Remove "Category:" prefix if present
+            if title.startswith("Category:"):
+                title = title[9:]
+            categories.append(title)
+        
+        cont = data.get("continue")
+        if not cont:
+            break
+    
+    return categories
+
+async def batch_fetch_page_data(page_ids: list[int]) -> dict[int, dict]:
+    """
+    Batch fetch extracts and categories for multiple pages.
+    Returns dict mapping page_id to {"extract": str, "categories": list[str], "title": str}.
+    """
+    # Wikipedia API allows up to 50 pageids per request
+    batch_size = 50
+    result: dict[int, dict] = {}
+    
+    for i in range(0, len(page_ids), batch_size):
+        batch = page_ids[i:i + batch_size]
+        pageids_str = "|".join(str(pid) for pid in batch)
+        
+        # Fetch extracts and categories in one request
+        data = await api_get({
+            "action": "query",
+            "format": "json",
+            "pageids": pageids_str,
+            "prop": "extracts|categories|info",
+            "exintro": "false",
+            "explaintext": "true",
+            "cllimit": "max",
+        })
+        
+        pages = data.get("query", {}).get("pages", {})
+        
+        for page_id_str, page in pages.items():
+            page_id = int(page_id_str)
+            extract = page.get("extract", "")
+            title = page.get("title", "")
+            
+            # Get categories
+            categories: list[str] = []
+            cats = page.get("categories", []) or []
+            for cat in cats:
+                cat_title = cat.get("title", "")
+                if cat_title.startswith("Category:"):
+                    cat_title = cat_title[9:]
+                categories.append(cat_title)
+            
+            result[page_id] = {
+                "extract": extract,
+                "categories": categories,
+                "title": title,
+            }
+        
+        # Handle pagination for categories if needed
+        cont = data.get("continue")
+        if cont and "clcontinue" in cont:
+            # Fetch remaining categories
+            for page_id in batch:
+                if page_id in result:
+                    # Fetch remaining categories for this page
+                    remaining_cats = await fetch_page_categories(page_id)
+                    # Merge with existing categories
+                    existing = set(result[page_id]["categories"])
+                    for cat in remaining_cats:
+                        if cat not in existing:
+                            result[page_id]["categories"].append(cat)
+    
+    return result
+

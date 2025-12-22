@@ -454,3 +454,146 @@ export async function fetchJobs(): Promise<{ jobs: Job[] }> {
   return { jobs }
 }
 
+export interface AnalyzeRelationshipsResponse {
+  analysis: string
+  conversation_id: string
+  cluster_size: number
+  sampled: boolean
+}
+
+/**
+ * Fetch Wikipedia page extract and categories for a page ID
+ */
+async function fetchWikipediaPageData(pageId: number): Promise<{ extract: string; categories: string[]; title: string }> {
+  const WIKI_API_BASE = 'https://en.wikipedia.org/w/api.php'
+  
+  // Fetch extract and categories in one request
+  const params = new URLSearchParams({
+    action: 'query',
+    format: 'json',
+    pageids: pageId.toString(),
+    prop: 'extracts|categories|info',
+    exintro: 'false',
+    explaintext: 'true',
+    cllimit: 'max',
+    origin: '*',
+  })
+
+  const response = await fetch(`${WIKI_API_BASE}?${params}`)
+  if (!response.ok) {
+    throw new Error(`Wikipedia API error: ${response.statusText}`)
+  }
+
+  const data = await response.json()
+  const pages = data.query?.pages || {}
+  const page = pages[pageId.toString()]
+
+  if (!page || page.missing) {
+    throw new Error(`Page ${pageId} not found`)
+  }
+
+  const extract = page.extract || ''
+  const categories = (page.categories || []).map((cat: any) => {
+    const title = cat.title || ''
+    return title.startsWith('Category:') ? title.slice(9) : title
+  })
+
+  return {
+    extract,
+    categories,
+    title: page.title || '',
+  }
+}
+
+/**
+ * Batch fetch Wikipedia data for multiple pages
+ */
+async function batchFetchWikipediaData(pageIds: number[]): Promise<Map<number, { extract: string; categories: string[]; title: string }>> {
+  const WIKI_API_BASE = 'https://en.wikipedia.org/w/api.php'
+  const batchSize = 50 // Wikipedia API limit
+  const result = new Map<number, { extract: string; categories: string[]; title: string }>()
+
+  for (let i = 0; i < pageIds.length; i += batchSize) {
+    const batch = pageIds.slice(i, i + batchSize)
+    const pageidsStr = batch.join('|')
+
+    const params = new URLSearchParams({
+      action: 'query',
+      format: 'json',
+      pageids: pageidsStr,
+      prop: 'extracts|categories|info',
+      exintro: 'false',
+      explaintext: 'true',
+      cllimit: 'max',
+      origin: '*',
+    })
+
+    const response = await fetch(`${WIKI_API_BASE}?${params}`)
+    if (!response.ok) continue
+
+    const data = await response.json()
+    const pages = data.query?.pages || {}
+
+    for (const pageId of batch) {
+      const page = pages[pageId.toString()]
+      if (page && !page.missing) {
+        const extract = page.extract || ''
+        const categories = (page.categories || []).map((cat: any) => {
+          const title = cat.title || ''
+          return title.startsWith('Category:') ? title.slice(9) : title
+        })
+
+        result.set(pageId, {
+          extract,
+          categories,
+          title: page.title || '',
+        })
+      }
+    }
+  }
+
+  return result
+}
+
+/**
+ * Analyze relationships between a selected first-degree node and its connected cluster
+ * This calls a server-side API route that handles the OpenAI Agents SDK securely
+ */
+export async function analyzeRelationships(
+  centerPageId: number,
+  selectedNodeId: number,
+  conversationId?: string,
+  followUpQuestion?: string,
+  conversationHistory?: Array<{ role: string; content: string }>
+): Promise<AnalyzeRelationshipsResponse> {
+  // Call the server-side API route
+  const response = await fetch('/api/graph/analyze-relationships', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      centerPageId,
+      selectedNodeId,
+      conversationId,
+      followUpQuestion,
+      conversationHistory,
+    }),
+  })
+
+  if (!response.ok) {
+    const error = await response.json()
+    throw new Error(error.error || 'Failed to analyze relationships')
+  }
+
+  const data = await response.json()
+  
+  // Map the response to match the expected interface
+  return {
+    analysis: data.analysis,
+    conversation_id: data.conversationId,
+    cluster_size: data.cluster_size || 0,
+    sampled: data.sampled || false,
+  }
+}
+

@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, Suspense } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { Switch } from '@headlessui/react'
 import GraphVisualization from '@/components/GraphVisualization'
+import RelationshipAnalyzer from '@/components/RelationshipAnalyzer'
 import { fetchEgoGraph, fetchAllGraph, fetchNodeConnections, searchPages } from '@/lib/api'
 
 function HomeContent() {
@@ -35,6 +36,10 @@ function HomeContent() {
   
   // Mobile drawer state
   const [isDrawerOpen, setIsDrawerOpen] = useState(false)
+  
+  // Relationship analyzer state
+  const [isAnalyzerOpen, setIsAnalyzerOpen] = useState(false)
+  const [selectedNodeForAnalysis, setSelectedNodeForAnalysis] = useState<number | null>(null)
 
   const loadGraph = async (id: string, updateUrl: boolean = true) => {
     if (!id.trim()) return
@@ -373,7 +378,30 @@ function HomeContent() {
             expansionHub={expansionHub}
             onNodeClick={handleNodeClick}
             onNodeDoubleClick={handleNodeDoubleClick}
-            onNodeSelect={(nodeId) => setSelectedNodeIdFromList(nodeId)}
+            onNodeSelect={(nodeId) => {
+              setSelectedNodeIdFromList(nodeId)
+              // Track selected node for analysis (only if it's a first-degree node, not center)
+              if (graphData && nodeId) {
+                const node = graphData.nodes.find((n: any) => n.page_id === nodeId)
+                const centerNode = graphData.nodes.find((n: any) => n.is_center)
+                if (node && centerNode && nodeId !== centerNode.page_id) {
+                  // Check if this node is first-degree (connected to center)
+                  const isFirstDegree = graphData.edges.some((e: any) => 
+                    (e.from === centerNode.page_id && e.to === nodeId) ||
+                    (e.to === centerNode.page_id && e.from === nodeId)
+                  )
+                  if (isFirstDegree) {
+                    setSelectedNodeForAnalysis(nodeId)
+                  } else {
+                    setSelectedNodeForAnalysis(null)
+                  }
+                } else {
+                  setSelectedNodeForAnalysis(null)
+                }
+              } else {
+                setSelectedNodeForAnalysis(null)
+              }
+            }}
             relationshipFilters={{
               showTwoWay,
               showOutbound,
@@ -395,6 +423,25 @@ function HomeContent() {
         )}
       </div>
 
+      {/* Analyze Relationships Button - Only visible when first-degree node is selected */}
+      {selectedNodeForAnalysis && graphData && !isAnalyzerOpen && (
+        <button
+          onClick={() => setIsAnalyzerOpen(true)}
+          className="fixed bottom-6 left-1/2 transform -translate-x-1/2 z-50 px-6 py-3 bg-[#4ecdc4] hover:bg-[#3bb5ad] text-[#0a0d14] font-semibold rounded-lg shadow-lg flex items-center gap-2 transition-all duration-300"
+          aria-label="Analyze Relationships"
+        >
+          <svg
+            className="w-5 h-5"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+          </svg>
+          Analyze Relationships
+        </button>
+      )}
+
       {/* Mobile Drawer Toggle Button */}
       {selectedNode && graphData && (
         <button
@@ -413,6 +460,18 @@ function HomeContent() {
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
           </svg>
         </button>
+      )}
+
+      {/* Relationship Analyzer Drawer */}
+      {graphData && selectedNodeForAnalysis && (
+        <RelationshipAnalyzer
+          isOpen={isAnalyzerOpen}
+          onClose={() => setIsAnalyzerOpen(false)}
+          centerPageId={graphData.center_page_id}
+          selectedNodeId={selectedNodeForAnalysis}
+          centerTitle={graphData.nodes.find((n: any) => n.is_center)?.title}
+          selectedTitle={graphData.nodes.find((n: any) => n.page_id === selectedNodeForAnalysis)?.title}
+        />
       )}
 
       {/* Info Panel - Bottom Drawer on Mobile, Full-Height Side Panel on Desktop */}
