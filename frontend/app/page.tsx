@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { Switch } from '@headlessui/react'
 import GraphVisualization from '@/components/GraphVisualization'
-import { fetchEgoGraph, fetchAllGraph, searchPages } from '@/lib/api'
+import { fetchEgoGraph, fetchAllGraph, fetchNodeConnections, searchPages } from '@/lib/api'
 
 export default function Home() {
   const router = useRouter()
@@ -15,6 +15,8 @@ export default function Home() {
   const [pageId, setPageId] = useState<string>('')
   const [selectedNode, setSelectedNode] = useState<any>(null)
   const [selectedNodeIdFromList, setSelectedNodeIdFromList] = useState<number | null>(null)
+  const [newNodeIds, setNewNodeIds] = useState<Set<number>>(new Set())
+  const [expansionHub, setExpansionHub] = useState<{ hubNodeId: number, newNodeIds: Set<number> } | null>(null)
   
   // Relationship type filters
   const [showTwoWay, setShowTwoWay] = useState(true)
@@ -42,9 +44,12 @@ export default function Home() {
         router.push(`/?page=${id}`, { scroll: false })
       }
       
-      const data = await fetchEgoGraph(parseInt(id), 500)
+      const data = await fetchEgoGraph(parseInt(id), 5000)
       setGraphData(data)
       setPageId(id)
+      // Reset new node tracking when loading a new graph
+      setNewNodeIds(new Set())
+      setExpansionHub(null)
       // Set selected node
       const centerNode = data.nodes.find((n: any) => n.is_center)
       setSelectedNode(centerNode || null)
@@ -71,6 +76,9 @@ export default function Home() {
       const newGraphData = await fetchEgoGraph(pageId, 500)
       setGraphData(newGraphData)
       setPageId(pageId.toString())
+      // Reset new node tracking when loading a new graph
+      setNewNodeIds(new Set())
+      setExpansionHub(null)
       
       // Update selected node
       const centerNode = newGraphData.nodes.find((n: any) => n.page_id === pageId)
@@ -79,6 +87,64 @@ export default function Home() {
       setSelectedNodeIdFromList(null)
     } catch (err: any) {
       setError(err.message || 'Failed to load node graph')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleNodeDoubleClick = async (pageId: number) => {
+    if (!graphData) return
+    
+    setLoading(true)
+    setError(null)
+    try {
+      // Fetch 1st-degree connections of the double-clicked node
+      const { nodes: newNodes, edges: newEdges } = await fetchNodeConnections(pageId, 5000)
+      
+      // Filter out nodes that are already in the graph
+      const existingNodeIds = new Set(graphData.nodes.map((n: any) => n.page_id))
+      const nodesToAdd = newNodes.filter((n: any) => !existingNodeIds.has(n.page_id))
+      
+      if (nodesToAdd.length === 0) {
+        // No new nodes to add
+        setLoading(false)
+        return
+      }
+      
+      // Create a set of existing edges for deduplication
+      const existingEdgeKeys = new Set(
+        graphData.edges.map((e: any) => `${Math.min(e.from, e.to)}-${Math.max(e.from, e.to)}`)
+      )
+      
+      // Filter out edges that are already in the graph
+      const edgesToAdd = newEdges.filter((e: any) => {
+        const key = `${Math.min(e.from, e.to)}-${Math.max(e.from, e.to)}`
+        return !existingEdgeKeys.has(key)
+      })
+      
+      // Track which nodes are newly added and which hub they expand from
+      const newIds = new Set(nodesToAdd.map((n: any) => n.page_id))
+      console.log(`[handleNodeDoubleClick] Expanding from node ${pageId}, adding ${nodesToAdd.length} new nodes:`, Array.from(newIds).slice(0, 10))
+      
+      setNewNodeIds(newIds)
+      
+      // Store the expansion hub (the double-clicked node) for positioning
+      const expansionData = {
+        hubNodeId: pageId,
+        newNodeIds: newIds
+      }
+      setExpansionHub(expansionData)
+      
+      // Merge new nodes and edges into existing graph
+      const expandedGraphData = {
+        ...graphData,
+        nodes: [...graphData.nodes, ...nodesToAdd],
+        edges: [...graphData.edges, ...edgesToAdd],
+      }
+      
+      setGraphData(expandedGraphData)
+    } catch (err: any) {
+      setError(err.message || 'Failed to expand graph')
     } finally {
       setLoading(false)
     }
@@ -283,7 +349,9 @@ export default function Home() {
         {displayGraphData ? (
           <GraphVisualization 
             data={displayGraphData} 
+            expansionHub={expansionHub}
             onNodeClick={handleNodeClick}
+            onNodeDoubleClick={handleNodeDoubleClick}
             onNodeSelect={(nodeId) => setSelectedNodeIdFromList(nodeId)}
             relationshipFilters={{
               showTwoWay,

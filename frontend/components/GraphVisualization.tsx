@@ -6,32 +6,15 @@ import { OrbitControls, Text } from '@react-three/drei'
 import * as THREE from 'three'
 import { GraphNode, GraphEdge } from '@/lib/api'
 
-// Atmospheric fog component for vignette effect
-function AtmosphericFog() {
-  const { scene } = useThree()
-  
-  useEffect(() => {
-    // Add exponential fog for atmospheric haze/vignette effect
-    // Exponential fog creates a more natural fade-out
-    const fog = new THREE.FogExp2('#000000', 0.015) // Dark fog, density controls fade distance
-    scene.fog = fog
-    
-    return () => {
-      // Cleanup fog when component unmounts
-      scene.fog = null
-    }
-  }, [scene])
-  
-  return null
-}
-
 interface GraphVisualizationProps {
   data: {
     center_page_id: number
     nodes: GraphNode[]
     edges: GraphEdge[]
   }
+  expansionHub?: { hubNodeId: number, newNodeIds: Set<number> } | null
   onNodeClick?: (pageId: number) => void
+  onNodeDoubleClick?: (pageId: number) => void
   onNodeSelect?: (pageId: number | null) => void
   relationshipFilters?: {
     showTwoWay: boolean
@@ -45,10 +28,12 @@ interface GraphVisualizationProps {
 function AutoRotatingOrbitControls({ 
   isInteracting,
   nodePositions,
+  shouldRefit,
   onFitted
 }: { 
   isInteracting: boolean
   nodePositions: Map<number, [number, number, number]>
+  shouldRefit?: boolean
   onFitted?: () => void
 }) {
   const controlsRef = useRef<any>(null)
@@ -56,17 +41,17 @@ function AutoRotatingOrbitControls({
   const hasFittedRef = useRef(false)
   const lastNodePositionsSizeRef = useRef(0)
   
-  // Reset fitting state when node positions change significantly
+  // Reset fitting state only when shouldRefit is true (new root graph, not expansion)
   useEffect(() => {
-    if (nodePositions.size !== lastNodePositionsSizeRef.current) {
+    if (shouldRefit && !hasFittedRef.current) {
       hasFittedRef.current = false
-      lastNodePositionsSizeRef.current = nodePositions.size
+      lastNodePositionsSizeRef.current = 0 // Reset to force refit
     }
-  }, [nodePositions])
+  }, [shouldRefit])
   
-  // Fit camera to view all nodes on first load
+  // Fit camera to view all nodes on first load (only when shouldRefit is true)
   useEffect(() => {
-    if (hasFittedRef.current || nodePositions.size === 0) return
+    if (!shouldRefit || hasFittedRef.current || nodePositions.size === 0) return
     
     // Use a small delay to ensure controls are initialized
     const timeout = setTimeout(() => {
@@ -617,6 +602,7 @@ function GraphNode3D({
   onHover,
   onUnhover,
   onClick,
+  onDoubleClick,
   animationStartTime,
   animationDuration
 }: { 
@@ -631,6 +617,7 @@ function GraphNode3D({
   onHover?: () => void
   onUnhover?: () => void
   onClick?: (e: any) => void
+  onDoubleClick?: (e: any) => void
   animationStartTime?: number
   animationDuration?: number
 }) {
@@ -835,6 +822,10 @@ function GraphNode3D({
           e.stopPropagation()
           if (onClick) onClick(e)
         }}
+        onDoubleClick={(e) => {
+          e.stopPropagation()
+          if (onDoubleClick) onDoubleClick(e)
+        }}
       >
         <sphereGeometry args={[size, 32, 32]} />
         <meshStandardMaterial 
@@ -864,7 +855,8 @@ function GraphNode3D({
 function calculateNodePositions(
   nodes: GraphNode[],
   edges: GraphEdge[],
-  centerPageId: number
+  centerPageId: number,
+  expansionHub?: { hubNodeId: number, newNodeIds: Set<number> } | null
 ): Map<number, [number, number, number]> {
   const positions = new Map<number, [number, number, number]>()
   
@@ -910,7 +902,116 @@ function calculateNodePositions(
     positions.set(nodeId, [x, yPos, z])
   })
   
-  // Ensure ALL nodes get positions (fallback for any nodes not yet positioned)
+  // Handle expansion: position new nodes radiating from the hub node, away from center
+  if (expansionHub) {
+    const hubNodeId = expansionHub.hubNodeId
+    const hubPos = positions.get(hubNodeId)
+    
+    if (hubPos) {
+      const [hubX, hubY, hubZ] = hubPos
+      
+      // Get direction from original center to hub (we want to position new nodes away from center)
+      const centerToHubX = hubX
+      const centerToHubY = hubY
+      const centerToHubZ = hubZ
+      const centerToHubLength = Math.sqrt(centerToHubX * centerToHubX + centerToHubY * centerToHubY + centerToHubZ * centerToHubZ)
+      
+      // Get new nodes that need positioning
+      const newNodesToPosition = nodes.filter(n => 
+        expansionHub.newNodeIds.has(n.page_id) && !positions.has(n.page_id)
+      )
+      
+      console.log(`[calculateNodePositions] Expansion hub: ${hubNodeId} at [${hubX}, ${hubY}, ${hubZ}], ${newNodesToPosition.length} new nodes to position`)
+      
+      // Position new nodes in a sphere around the hub, much further from original center
+      const goldenAngle = Math.PI * (3 - Math.sqrt(5))
+      const baseRadius = 10 // Base radius around hub
+      
+      newNodesToPosition.forEach((node, index) => {
+        const totalDegree = node.out_degree + node.in_degree
+        const radius = baseRadius + Math.log10(totalDegree + 1) * 1.5
+        
+        // Spherical coordinates around hub
+        const theta = goldenAngle * index
+        const y = newNodesToPosition.length > 1 ? 1 - (index / (newNodesToPosition.length - 1)) * 2 : 0
+        const radiusAtY = Math.sqrt(Math.max(0, 1 - y * y))
+        
+        // Local position relative to hub
+        const localX = radiusAtY * Math.cos(theta) * radius
+        const localY = y * radius
+        const localZ = radiusAtY * Math.sin(theta) * radius
+        
+        // Push new nodes much further away from the original center (0, 0, 0)
+        // Calculate distance from center to hub
+        const hubDistanceFromCenter = centerToHubLength
+        
+        // If center-to-hub direction exists, push new nodes much further out
+        if (centerToHubLength > 0) {
+          const awayDirectionX = centerToHubX / centerToHubLength
+          const awayDirectionY = centerToHubY / centerToHubLength
+          const awayDirectionZ = centerToHubZ / centerToHubLength
+          
+          // Calculate minimum distance from center for new nodes (at least 45 units, or 3.75x hub distance)
+          const minDistanceFromCenter = Math.max(hubDistanceFromCenter * 3.75, 45)
+          
+          // Position node around hub first
+          const nodeAroundHubX = hubX + localX
+          const nodeAroundHubY = hubY + localY
+          const nodeAroundHubZ = hubZ + localZ
+          
+          // Calculate current distance from center
+          const currentDistanceFromCenter = Math.sqrt(
+            nodeAroundHubX * nodeAroundHubX + 
+            nodeAroundHubY * nodeAroundHubY + 
+            nodeAroundHubZ * nodeAroundHubZ
+          )
+          
+          // If node is too close to center, push it further away along the away-from-center direction
+          if (currentDistanceFromCenter < minDistanceFromCenter) {
+            // Calculate how much we need to push
+            const pushNeeded = minDistanceFromCenter - currentDistanceFromCenter
+            
+            // Push along the away-from-center direction
+            const finalX = nodeAroundHubX + awayDirectionX * pushNeeded
+            const finalY = nodeAroundHubY + awayDirectionY * pushNeeded
+            const finalZ = nodeAroundHubZ + awayDirectionZ * pushNeeded
+            
+            positions.set(node.page_id, [finalX, finalY, finalZ])
+            const finalDistance = Math.sqrt(finalX * finalX + finalY * finalY + finalZ * finalZ)
+            console.log(`[calculateNodePositions] Positioned new node ${node.page_id} (${node.title}) at [${finalX.toFixed(2)}, ${finalY.toFixed(2)}, ${finalZ.toFixed(2)}] (${finalDistance.toFixed(2)} units from center, min was ${minDistanceFromCenter.toFixed(2)})`)
+          } else {
+            // Already far enough, use position around hub
+            positions.set(node.page_id, [nodeAroundHubX, nodeAroundHubY, nodeAroundHubZ])
+            console.log(`[calculateNodePositions] Positioned new node ${node.page_id} (${node.title}) at [${nodeAroundHubX.toFixed(2)}, ${nodeAroundHubY.toFixed(2)}, ${nodeAroundHubZ.toFixed(2)}] (${currentDistanceFromCenter.toFixed(2)} units from center, already >= ${minDistanceFromCenter.toFixed(2)})`)
+          }
+        } else {
+          // Fallback: position at a fixed distance from center (if hub is at center)
+          const fallbackDistance = 45 // Far from center (50% more than 30)
+          // Normalize local position to get direction
+          const localLength = Math.sqrt(localX * localX + localY * localY + localZ * localZ)
+          if (localLength > 0) {
+            const dirX = localX / localLength
+            const dirY = localY / localLength
+            const dirZ = localZ / localLength
+            const finalX = dirX * fallbackDistance
+            const finalY = dirY * fallbackDistance
+            const finalZ = dirZ * fallbackDistance
+            positions.set(node.page_id, [finalX, finalY, finalZ])
+          } else {
+            // Random direction if local position is zero
+            const finalX = fallbackDistance
+            const finalY = 0
+            const finalZ = 0
+            positions.set(node.page_id, [finalX, finalY, finalZ])
+          }
+        }
+      })
+    } else {
+      console.warn(`[calculateNodePositions] Expansion hub ${hubNodeId} not found in positions!`)
+    }
+  }
+  
+  // Ensure ALL remaining nodes get positions (fallback for any nodes not yet positioned)
   nodes.forEach(node => {
     if (!positions.has(node.page_id)) {
       // Position unconnected nodes in a sphere further out
@@ -933,13 +1034,14 @@ function calculateNodePositions(
   return positions
 }
 
-export default function GraphVisualization({ data, onNodeClick, onNodeSelect, relationshipFilters, externalSelectedNodeId }: GraphVisualizationProps) {
+export default function GraphVisualization({ data, expansionHub, onNodeClick, onNodeDoubleClick, onNodeSelect, relationshipFilters, externalSelectedNodeId }: GraphVisualizationProps) {
   const { nodes, edges } = data
   const [hoveredNodeId, setHoveredNodeId] = useState<number | null>(null)
   const [selectedNodeId, setSelectedNodeId] = useState<number | null>(null)
   const [isUserInteracting, setIsUserInteracting] = useState(false)
   const animationStartTimeRef = useRef<number | null>(null)
   const [hasFittedCamera, setHasFittedCamera] = useState(false)
+  const prevCenterPageIdRef = useRef<number>(data.center_page_id)
   
   // Sync external selected node ID with internal state
   useEffect(() => {
@@ -949,15 +1051,21 @@ export default function GraphVisualization({ data, onNodeClick, onNodeSelect, re
   }, [externalSelectedNodeId])
   
   // Initialize animation start time when graph data changes
+  // Only reset camera fitting if center_page_id changes (new root), not when expanding
   useEffect(() => {
     animationStartTimeRef.current = null // Reset on new graph
-    setHasFittedCamera(false) // Reset camera fitting
-  }, [data.center_page_id, nodes.length])
+    // Only reset camera fitting if the center page changes (new root graph)
+    // Don't reset when just adding nodes (expanding) - camera should stay put
+    if (prevCenterPageIdRef.current !== data.center_page_id) {
+      setHasFittedCamera(false) // Reset camera fitting only for new root
+      prevCenterPageIdRef.current = data.center_page_id
+    }
+  }, [data.center_page_id])
   
   // Calculate node positions ONCE using ALL nodes and edges (don't recalculate when filters change)
   const nodePositions = useMemo(() => {
     console.log(`[GraphVisualization] Calculating positions for ${nodes.length} nodes, ${edges.length} edges, center=${data.center_page_id}`)
-    const positions = calculateNodePositions(nodes, edges, data.center_page_id)
+    const positions = calculateNodePositions(nodes, edges, data.center_page_id, expansionHub)
     console.log(`[GraphVisualization] Calculated ${positions.size} positions`)
     // Verify all nodes have positions
     nodes.forEach(node => {
@@ -966,7 +1074,7 @@ export default function GraphVisualization({ data, onNodeClick, onNodeSelect, re
       }
     })
     return positions
-  }, [nodes, edges, data.center_page_id])
+  }, [nodes, edges, data.center_page_id, expansionHub])
   
   // Calculate animation order: Two way (by connections desc), Inbound (by connections desc), Outbound (by connections desc)
   const animationOrder = useMemo(() => {
@@ -1261,7 +1369,6 @@ export default function GraphVisualization({ data, onNodeClick, onNodeSelect, re
       camera={{ position: [0, 0, 25], fov: 50 }}
       shadows
     >
-      <AtmosphericFog />
       <AnimationInitializer />
       
       {/* Invisible background plane to catch clicks outside nodes */}
@@ -1513,6 +1620,13 @@ export default function GraphVisualization({ data, onNodeClick, onNodeSelect, re
                   onNodeClick(node.page_id)
                 }
               }}
+              onDoubleClick={(e) => {
+                e.stopPropagation()
+                // Double-click expands the graph with this node's 1st-degree connections
+                if (onNodeDoubleClick) {
+                  onNodeDoubleClick(node.page_id)
+                }
+              }}
             />
           )
         })
@@ -1521,6 +1635,7 @@ export default function GraphVisualization({ data, onNodeClick, onNodeSelect, re
       <AutoRotatingOrbitControls 
         isInteracting={isUserInteracting}
         nodePositions={nodePositions}
+        shouldRefit={!hasFittedCamera}
         onFitted={() => setHasFittedCamera(true)}
       />
     </Canvas>

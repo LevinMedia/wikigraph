@@ -37,7 +37,7 @@ export interface Job {
  */
 export async function fetchEgoGraph(
   pageId: number,
-  limitNeighbors: number = 500
+  limitNeighbors: number = 5000  // Increased from 500 to allow more connections
 ): Promise<GraphEgoResponse> {
   const db = requireSupabase()
 
@@ -121,6 +121,85 @@ export async function fetchEgoGraph(
     nodes,
     edges,
   }
+}
+
+/**
+ * Fetch 1st-degree connections of a node (for expanding graph)
+ * Returns nodes and edges that connect to the given node
+ */
+export async function fetchNodeConnections(
+  pageId: number,
+  limitNeighbors: number = 5000  // Increased from 500 to allow more connections
+): Promise<{ nodes: GraphNode[], edges: GraphEdge[] }> {
+  const db = requireSupabase()
+
+  // Get outbound and inbound links
+  const { data: outLinks } = await db
+    .from('links')
+    .select('to_page_id')
+    .eq('from_page_id', pageId)
+    .limit(limitNeighbors)
+
+  const { data: inLinks } = await db
+    .from('links')
+    .select('from_page_id')
+    .eq('to_page_id', pageId)
+    .limit(limitNeighbors)
+
+  // Collect neighbor IDs
+  const neighborIds = new Set<number>()
+  if (outLinks) {
+    outLinks.forEach((link: any) => neighborIds.add(link.to_page_id))
+  }
+  if (inLinks) {
+    inLinks.forEach((link: any) => neighborIds.add(link.from_page_id))
+  }
+
+  if (neighborIds.size === 0) {
+    return { nodes: [], edges: [] }
+  }
+
+  const neighborIdsArray = Array.from(neighborIds)
+
+  // Fetch neighbor page details
+  const { data: pagesData, error: pagesError } = await db
+    .from('pages')
+    .select('page_id, title, out_degree, in_degree')
+    .in('page_id', neighborIdsArray)
+
+  if (pagesError) {
+    throw new Error(`Failed to fetch page details: ${pagesError.message}`)
+  }
+
+  // Build nodes list (not marked as center)
+  const nodes: GraphNode[] = (pagesData || []).map((page: any) => ({
+    page_id: page.page_id,
+    title: page.title,
+    out_degree: page.out_degree,
+    in_degree: page.in_degree,
+    is_center: false,
+  }))
+
+  // Get edges: edges from/to the clicked node, and edges between neighbors
+  const allNodeIds = [pageId, ...neighborIdsArray]
+  const { data: allEdges } = await db
+    .from('links')
+    .select('from_page_id, to_page_id')
+    .in('from_page_id', allNodeIds)
+    .in('to_page_id', allNodeIds)
+
+  // Build edges list
+  const edges: GraphEdge[] = []
+  if (allEdges) {
+    allEdges.forEach((edge: any) => {
+      edges.push({
+        from: edge.from_page_id,
+        to: edge.to_page_id,
+      })
+    })
+  }
+
+  return { nodes, edges }
 }
 
 /**
