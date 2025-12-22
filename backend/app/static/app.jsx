@@ -69,6 +69,11 @@ function App() {
   const [enqueueTitle, setEnqueueTitle] = useState('');
   const [enqueuePriority, setEnqueuePriority] = useState(0);
   const [enqueueResult, setEnqueueResult] = useState('');
+  const [pagination, setPagination] = useState({ total: 0, limit: 10000, offset: 0, has_more: false });
+  const [counts, setCounts] = useState({ active: 0, done: 0, discovered: 0, total: 0 });
+  const [estimateTitle, setEstimateTitle] = useState('');
+  const [estimateResult, setEstimateResult] = useState(null);
+  const [estimating, setEstimating] = useState(false);
 
   // Initialize Supabase client if available
   const supabase = React.useMemo(() => {
@@ -82,15 +87,17 @@ function App() {
     return null;
   }, []);
 
-  const fetchJobs = async () => {
+  const fetchJobs = async (limit = 10000, offset = 0) => {
     setLoading(true);
     try {
-      const res = await fetch('/api/admin/jobs');
+      const res = await fetch(`/api/admin/jobs?limit=${limit}&offset=${offset}`);
       if (!res.ok) {
         throw new Error(`HTTP error! status: ${res.status}`);
       }
       const data = await res.json();
       setJobs(data.jobs || []);
+      setPagination(data.pagination || { total: 0, limit: 10000, offset: 0, has_more: false });
+      setCounts(data.counts || { active: 0, done: 0, discovered: 0, total: 0 });
     } catch (err) {
       console.error('Error fetching jobs:', err);
       setJobs([]); // Set empty array on error to prevent infinite loading
@@ -213,6 +220,37 @@ function App() {
     }
   };
 
+  const handleEstimateBlastRadius = async () => {
+    if (!estimateTitle.trim()) {
+      setEstimateResult({ error: 'Please enter a title or URL' });
+      return;
+    }
+
+    setEstimating(true);
+    setEstimateResult(null);
+    try {
+      const res = await fetch(`/api/admin/estimate-blast-radius?title=${encodeURIComponent(estimateTitle.trim())}`);
+      if (!res.ok) {
+        const errorText = await res.text();
+        let errorMsg;
+        try {
+          const errorJson = JSON.parse(errorText);
+          errorMsg = errorJson.detail || errorJson.message || errorText;
+        } catch {
+          errorMsg = errorText.substring(0, 200);
+        }
+        throw new Error(errorMsg);
+      }
+
+      const data = await res.json();
+      setEstimateResult(data);
+    } catch (e) {
+      setEstimateResult({ error: e.message });
+    } finally {
+      setEstimating(false);
+    }
+  };
+
 
   const formatDate = (dateStr) => {
     if (!dateStr) return '-';
@@ -226,13 +264,78 @@ function App() {
 
   const columns = [
     { accessorKey: 'page_id', header: 'Page ID' },
-    { accessorKey: 'title', header: 'Title' },
+    { 
+      accessorKey: 'title', 
+      header: 'Title',
+      cell: ({ row }) => {
+        const degree = row.original.degree;
+        const indent = degree === 0 ? 0 : degree === 1 ? 20 : degree === 2 ? 40 : 0;
+        const prefix = degree === 0 ? '🌳 ' : degree === 1 ? '  └─ ' : degree === 2 ? '    └─ ' : '';
+        return (
+          <span style={{ paddingLeft: `${indent}px`, display: 'inline-block' }}>
+            {prefix}{row.original.title}
+          </span>
+        );
+      }
+    },
+    { 
+      accessorKey: 'degree', 
+      header: 'Degree',
+      cell: ({ getValue }) => {
+        const degree = getValue();
+        if (degree === null || degree === undefined) return '-';
+        return degree === 0 ? 'Root' : `Degree ${degree}`;
+      }
+    },
+    { 
+      accessorKey: 'root_page_id', 
+      header: 'Root',
+      cell: ({ getValue, row }) => {
+        const rootId = getValue();
+        if (!rootId) return '-';
+        // Find root title if available
+        const rootJob = jobs.find(j => j.page_id === rootId);
+        return rootJob ? `${rootJob.title} (${rootId})` : `Page ${rootId}`;
+      }
+    },
     { 
       accessorKey: 'status', 
       header: 'Status',
-      cell: ({ getValue }) => (
-        <span className="badge">{getValue()}</span>
-      )
+      cell: ({ getValue, row }) => {
+        const status = getValue();
+        const progressStage = row.original.progress_stage;
+        const progressCount = row.original.progress_count;
+        
+        let statusDisplay = <span className="badge">{status}</span>;
+        
+        // Add progress indicator for running jobs
+        if (status === 'running' && progressStage) {
+          const stageNames = {
+            'fetching_outbound_links': 'Fetching outbound links...',
+            'fetching_inbound_links': 'Fetching inbound links...',
+            'links_fetched': `Links fetched: ${progressCount || 0}`,
+            'resolving_titles': 'Resolving titles...',
+            'titles_resolved': `Titles resolved: ${progressCount || 0}`,
+            'inserting_pages': `Inserting pages: ${progressCount || 0}`,
+            'inserting_links': `Inserting links: ${progressCount || 0}`,
+            'computing_degrees': 'Computing degrees...',
+            'crawling_degree_0': 'Crawling (root)...',
+            'crawling_degree_1': 'Crawling (first-degree)...',
+            'crawling_degree_2': 'Crawling (second-degree)...',
+          };
+          const stageDisplay = stageNames[progressStage] || progressStage;
+          statusDisplay = (
+            <div>
+              <span className="badge">{status}</span>
+              <span style={{ marginLeft: '8px', fontSize: '12px', opacity: 0.7 }}>
+                {stageDisplay}
+              </span>
+            </div>
+          );
+        }
+        
+        return statusDisplay;
+      }
     },
     { accessorKey: 'priority', header: 'Priority' },
     { accessorKey: 'out_degree', header: 'Out Degree' },
@@ -280,8 +383,20 @@ function App() {
     }
   ];
 
-  const crawled = jobs.filter(j => j.status === 'done');
+  // Sort crawled jobs by finished_at (ascending - earliest first)
+  // This ensures root page (finished first) appears first, then first-degree in order
+  const crawled = jobs
+    .filter(j => j.status === 'done')
+    .sort((a, b) => {
+      const aTime = a.finished_at ? new Date(a.finished_at).getTime() : 0;
+      const bTime = b.finished_at ? new Date(b.finished_at).getTime() : 0;
+      return aTime - bTime; // Ascending order
+    });
+  
+  // Discovered: second-degree nodes that weren't crawled (status = 'discovered')
   const discovered = jobs.filter(j => j.status === 'discovered');
+  
+  // Active jobs: group by root_page_id for better visualization
   const activeJobs = jobs.filter(j => ['queued', 'running', 'error', 'paused'].includes(j.status));
   
   // Debug: log counts
@@ -411,6 +526,93 @@ function App() {
         <div className="small">{enqueueResult}</div>
       </section>
 
+      <section className="card" style={{ border: '1px solid #4ecdc4' }}>
+        <h2 style={{ color: '#4ecdc4' }}>📊 Estimate Blast Radius</h2>
+        <p className="small" style={{ marginBottom: '12px', opacity: 0.8 }}>
+          Get a quick estimate of how many pages will be scraped for a given URL (doesn't actually crawl)
+        </p>
+        <div className="row">
+          <input
+            value={estimateTitle}
+            onChange={(e) => setEstimateTitle(e.target.value)}
+            placeholder="Wikipedia title or URL"
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                handleEstimateBlastRadius();
+              }
+            }}
+          />
+          <button 
+            onClick={handleEstimateBlastRadius} 
+            disabled={estimating}
+            style={{ background: '#4ecdc4', color: 'white' }}
+          >
+            {estimating ? 'Estimating...' : 'Estimate'}
+          </button>
+        </div>
+        {estimateResult && (
+          <div style={{ marginTop: '16px', padding: '12px', background: '#0f1120', borderRadius: '4px', border: '1px solid #22263a' }}>
+            {estimateResult.error ? (
+              <div style={{ color: '#dc2626' }}>Error: {estimateResult.error}</div>
+            ) : (
+              <div>
+                <div style={{ marginBottom: '12px' }}>
+                  <strong style={{ color: '#4ecdc4' }}>{estimateResult.root?.title}</strong>
+                  <span style={{ marginLeft: '8px', opacity: 0.7, fontSize: '14px' }}>
+                    (ID: {estimateResult.root?.page_id})
+                  </span>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '12px', marginBottom: '12px' }}>
+                  <div>
+                    <div style={{ fontSize: '12px', opacity: 0.7 }}>Root Pages</div>
+                    <div style={{ fontSize: '20px', fontWeight: 'bold', color: '#eaf0ff' }}>
+                      {estimateResult.estimates?.root_pages || 0}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: '12px', opacity: 0.7 }}>First-Degree to Crawl</div>
+                    <div style={{ fontSize: '20px', fontWeight: 'bold', color: '#4ecdc4' }}>
+                      {estimateResult.estimates?.first_degree_to_crawl || 0}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: '12px', opacity: 0.7 }}>Second-Degree to Discover</div>
+                    <div style={{ fontSize: '20px', fontWeight: 'bold', color: '#a78bfa' }}>
+                      {estimateResult.estimates?.second_degree_to_discover || 0}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: '12px', opacity: 0.7 }}>Total Pages</div>
+                    <div style={{ fontSize: '20px', fontWeight: 'bold', color: '#eaf0ff' }}>
+                      {estimateResult.estimates?.total_pages || 0}
+                    </div>
+                  </div>
+                </div>
+                {estimateResult.breakdown && (
+                  <details style={{ marginTop: '8px' }}>
+                    <summary style={{ cursor: 'pointer', fontSize: '12px', opacity: 0.7, marginBottom: '8px' }}>
+                      View Breakdown
+                    </summary>
+                    <div style={{ fontSize: '12px', opacity: 0.8, lineHeight: '1.6' }}>
+                      <div>Outbound links: {estimateResult.breakdown.outbound_links}</div>
+                      <div>Inbound links: {estimateResult.breakdown.inbound_links}</div>
+                      <div>First-degree sampled: {estimateResult.breakdown.first_degree_sampled} / {estimateResult.breakdown.first_degree_total}</div>
+                      <div>Second-degree titles found: {estimateResult.breakdown.second_degree_titles_found}</div>
+                      <div>Estimated second-degree unique: {estimateResult.breakdown.estimated_second_degree_unique}</div>
+                    </div>
+                  </details>
+                )}
+                {estimateResult.note && (
+                  <div style={{ marginTop: '8px', fontSize: '11px', opacity: 0.6, fontStyle: 'italic' }}>
+                    {estimateResult.note}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+
       <section className="card" style={{ border: '2px solid #dc2626' }}>
         <h2 style={{ color: '#dc2626' }}>⚠️ Danger Zone (Testing Only)</h2>
         <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
@@ -485,10 +687,14 @@ function App() {
 
       <section className="card">
         <h2>Jobs</h2>
-        <div style={{ marginBottom: '16px' }}>
-          <button onClick={fetchJobs} disabled={loading}>
+        <div style={{ marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '16px', flexWrap: 'wrap' }}>
+          <button onClick={() => fetchJobs()} disabled={loading}>
             {loading ? 'Loading...' : 'Refresh'}
           </button>
+          <div style={{ fontSize: '14px', opacity: 0.7 }}>
+            Total: {counts.total} | Active: {counts.active} | Done: {counts.done} | Discovered: {counts.discovered}
+            {pagination.has_more && ` (Showing ${pagination.offset + jobs.length} of ${pagination.total})`}
+          </div>
         </div>
         
         <TabGroup defaultIndex={0}>
@@ -505,7 +711,28 @@ function App() {
               {createTable(discovered)}
             </TabPanel>
             <TabPanel>
-              {createTable(activeJobs)}
+              {activeJobs.length > 0 ? (
+                <div>
+                  <div style={{ marginBottom: '16px', fontSize: '14px', opacity: 0.7 }}>
+                    Showing {activeJobs.length} active job(s) - grouped by root page
+                  </div>
+                  {createTable(activeJobs.sort((a, b) => {
+                    // Sort by root_page_id first, then by degree, then by status priority
+                    const aRoot = a.root_page_id || a.page_id;
+                    const bRoot = b.root_page_id || b.page_id;
+                    if (aRoot !== bRoot) return aRoot - bRoot;
+                    
+                    const aDegree = a.degree ?? 999;
+                    const bDegree = b.degree ?? 999;
+                    if (aDegree !== bDegree) return aDegree - bDegree;
+                    
+                    const statusOrder = { 'running': 0, 'queued': 1, 'error': 2, 'paused': 3 };
+                    return (statusOrder[a.status] ?? 99) - (statusOrder[b.status] ?? 99);
+                  }))}
+                </div>
+              ) : (
+                createTable(activeJobs)
+              )}
             </TabPanel>
           </TabPanels>
         </TabGroup>

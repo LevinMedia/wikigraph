@@ -148,24 +148,23 @@ async def mark_error(pool, page_id: int, err: str):
     )
 
 async def update_progress(pool, page_id: int, stage: str, count: int = 0):
-    """Update progress in last_cursor field as JSON, preserving existing data like link_direction"""
+    """Update progress in last_cursor field as JSON, preserving existing data like link_direction, degree, root_page_id"""
     import json
     # Get existing cursor to preserve link_direction and other metadata
     existing = await pool.fetchval("SELECT last_cursor FROM page_fetch WHERE page_id = $1", page_id)
     cursor_data = {"stage": stage, "count": count}
     
-    # Preserve existing metadata (like link_direction, auto_crawl)
+    # Preserve existing metadata (like link_direction, auto_crawl, degree, root_page_id)
     if existing:
         try:
             if isinstance(existing, str):
                 existing_data = json.loads(existing)
             else:
                 existing_data = existing
-            # Preserve link_direction and auto_crawl if they exist
-            if "link_direction" in existing_data:
-                cursor_data["link_direction"] = existing_data["link_direction"]
-            if "auto_crawl" in existing_data:
-                cursor_data["auto_crawl"] = existing_data["auto_crawl"]
+            # Preserve all important metadata
+            for key in ["link_direction", "auto_crawl", "degree", "root_page_id", "crawl_with_neighbors"]:
+                if key in existing_data:
+                    cursor_data[key] = existing_data[key]
         except:
             pass  # If we can't parse, just use the new data
     
@@ -337,17 +336,12 @@ async def crawl_with_neighbors(pool, initial_page_id: int, degree: int = 0, root
     connected = await crawl_both_directions(pool, initial_page_id)
     logger.info(f"Page {initial_page_id} (degree {degree}) connected to {len(connected)} pages")
     
-    # Step 2: If we're below MAX_DEGREE, enqueue neighbors at degree+1
-    if degree < settings.MAX_DEGREE:
-        neighbor_ids = list(connected)
-        logger.info(f"Found {len(neighbor_ids)} neighbors for page {initial_page_id} at degree {degree}")
-        
-        # Get all pages we've already seen (to avoid re-crawling)
-        # This includes the root page and all pages at degrees <= current degree
-        seen_pages = {root_page_id}
-        
-        # Query all pages that have been crawled at degrees <= current degree
-        # We'll exclude pages that are already at a lower degree (closer to root)
+    # Step 2: Handle neighbors based on degree
+    neighbor_ids = list(connected)
+    logger.info(f"Found {len(neighbor_ids)} neighbors for page {initial_page_id} at degree {degree}")
+    
+    if degree == 0:
+        # At root (degree 0): enqueue first-degree neighbors (degree 1) to crawl
         for neighbor_id in neighbor_ids:
             # Check if already queued, running, or done
             existing_status = await pool.fetchval(
@@ -365,9 +359,8 @@ async def crawl_with_neighbors(pool, initial_page_id: int, degree: int = 0, root
             if existing_cursor:
                 try:
                     existing_cursor_data = json.loads(existing_cursor) if isinstance(existing_cursor, str) else existing_cursor
-                    existing_degree = existing_cursor_data.get("degree", 999)  # Default to high number if not set
-                    if existing_degree < degree + 1:
-                        # This page was already crawled at a lower degree, skip it
+                    existing_degree = existing_cursor_data.get("degree", 999)
+                    if existing_degree < 1:
                         should_enqueue = False
                 except:
                     pass
@@ -375,10 +368,10 @@ async def crawl_with_neighbors(pool, initial_page_id: int, degree: int = 0, root
             # Only enqueue if not already done/running and not seen at lower degree
             if should_enqueue and existing_status != 'done' and existing_status != 'running':
                 cursor_data = {
-                    "link_direction": "outbound",  # Will crawl both directions
-                    "crawl_with_neighbors": False,  # Processed by worker, not recursively
-                    "degree": degree + 1,  # Track degree level
-                    "root_page_id": root_page_id  # Track which root this belongs to
+                    "link_direction": "outbound",
+                    "crawl_with_neighbors": False,
+                    "degree": 1,
+                    "root_page_id": root_page_id
                 }
                 await pool.execute(
                     """
@@ -388,6 +381,72 @@ async def crawl_with_neighbors(pool, initial_page_id: int, degree: int = 0, root
                       status = CASE 
                         WHEN page_fetch.status = 'running' THEN page_fetch.status
                         WHEN page_fetch.status = 'done' THEN page_fetch.status
+                        WHEN page_fetch.status = 'discovered' THEN 'discovered'  -- Preserve discovered status
+                        ELSE 'queued'
+                      END,
+                      last_cursor = COALESCE(excluded.last_cursor, page_fetch.last_cursor)
+                    """,
+                    neighbor_id, 
+                    json.dumps(cursor_data),
+                    f"degree_1_of_{root_page_id}"
+                )
+                logger.info(f"Enqueued first-degree neighbor {neighbor_id} (root: {root_page_id})")
+    
+    elif degree == 1:
+        # At first-degree (degree 1): mark second-degree neighbors (degree 2) as "discovered" but don't crawl
+        neighbors_to_discover = []
+        for neighbor_id in neighbor_ids:
+            existing_status = await pool.fetchval(
+                "SELECT status FROM page_fetch WHERE page_id = $1", 
+                neighbor_id
+            )
+            # Only mark as discovered if not already done, running, queued, or discovered
+            if existing_status not in ('done', 'running', 'queued', 'discovered'):
+                neighbors_to_discover.append(neighbor_id)
+        
+        if neighbors_to_discover:
+            await mark_as_discovered(pool, neighbors_to_discover, f"degree_2_of_{root_page_id}")
+            logger.info(f"Marked {len(neighbors_to_discover)} second-degree neighbors as discovered (root: {root_page_id})")
+    
+    elif degree < settings.MAX_DEGREE:
+        # For higher degrees (if MAX_DEGREE > 2): enqueue neighbors
+        for neighbor_id in neighbor_ids:
+            existing_status = await pool.fetchval(
+                "SELECT status FROM page_fetch WHERE page_id = $1", 
+                neighbor_id
+            )
+            
+            existing_cursor = await pool.fetchval(
+                "SELECT last_cursor FROM page_fetch WHERE page_id = $1",
+                neighbor_id
+            )
+            should_enqueue = True
+            
+            if existing_cursor:
+                try:
+                    existing_cursor_data = json.loads(existing_cursor) if isinstance(existing_cursor, str) else existing_cursor
+                    existing_degree = existing_cursor_data.get("degree", 999)
+                    if existing_degree < degree + 1:
+                        should_enqueue = False
+                except:
+                    pass
+            
+            if should_enqueue and existing_status != 'done' and existing_status != 'running':
+                cursor_data = {
+                    "link_direction": "outbound",
+                    "crawl_with_neighbors": False,
+                    "degree": degree + 1,
+                    "root_page_id": root_page_id
+                }
+                await pool.execute(
+                    """
+                    INSERT INTO page_fetch (page_id, status, priority, last_cursor, requested_by)
+                    VALUES ($1, 'queued', 0, $2::jsonb, $3)
+                    ON CONFLICT (page_id) DO UPDATE SET
+                      status = CASE 
+                        WHEN page_fetch.status = 'running' THEN page_fetch.status
+                        WHEN page_fetch.status = 'done' THEN page_fetch.status
+                        WHEN page_fetch.status = 'discovered' THEN 'discovered'  -- Preserve discovered status
                         ELSE 'queued'
                       END,
                       last_cursor = COALESCE(excluded.last_cursor, page_fetch.last_cursor)
