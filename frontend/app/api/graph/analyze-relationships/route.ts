@@ -1,124 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
-import { Agent, tool, run, setDefaultOpenAIKey } from '@openai/agents'
+import { run, setDefaultOpenAIKey } from '@openai/agents'
+import { fetchWikipediaPageData } from './wiki-utils'
+import { createRelationshipAnalyzerAgent, buildAgentContext } from './agent'
 
 // Server-side Supabase client
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 const supabase = createClient(supabaseUrl, supabaseAnonKey)
-
-// Helper to fetch Wikipedia page data
-async function fetchWikipediaPageData(pageId: number, fetchFullText: boolean = false): Promise<{ extract: string; fullText: string; categories: string[]; title: string }> {
-  try {
-    // First, get the page title from the API
-    const titleUrl = `https://en.wikipedia.org/w/api.php?action=query&pageids=${pageId}&prop=info&inprop=url&format=json&origin=*`
-    
-    // Wikipedia API requires User-Agent header for server-side requests
-    const userAgent = process.env.WIKIPEDIA_USER_AGENT || 
-      'WikiGraphExplorer/1.0 (https://github.com/yourusername/wikiGraph; contact@example.com)'
-    
-    const headers = {
-      'User-Agent': userAgent,
-      'Accept': 'application/json',
-    }
-    
-    // Get title first
-    const titleRes = await fetch(titleUrl, { headers })
-    if (!titleRes.ok || !titleRes.headers.get('content-type')?.includes('application/json')) {
-      throw new Error(`Wikipedia API returned non-JSON response for title`)
-    }
-    const titleData = await titleRes.json()
-    const title = titleData.query?.pages?.[pageId]?.title || ''
-    
-    if (!title) {
-      throw new Error(`Could not get title for page ${pageId}`)
-    }
-    
-    // Fetch intro extract (for quick context)
-    const extractUrl = `https://en.wikipedia.org/w/api.php?action=query&pageids=${pageId}&prop=extracts&exintro=true&explaintext=true&format=json&origin=*`
-    
-    // Fetch RAW wikitext (complete page content including all tables) - this is the key!
-    const rawTextUrl: string | null = fetchFullText
-      ? `https://en.wikipedia.org/w/index.php?title=${encodeURIComponent(title)}&action=raw`
-      : null
-    
-    const categoriesUrl = `https://en.wikipedia.org/w/api.php?action=query&pageids=${pageId}&prop=categories&cllimit=50&format=json&origin=*`
-
-    const fetchPromises = [
-      fetch(extractUrl, { headers }),
-      fetch(categoriesUrl, { headers }),
-    ]
-    
-    if (rawTextUrl) {
-      // Raw wikitext is plain text, not JSON
-      fetchPromises.push(fetch(rawTextUrl, { headers: { 'User-Agent': userAgent } }))
-    }
-    
-    const results = await Promise.all(fetchPromises)
-    const extractRes = results[0]
-    const categoriesRes = results[1]
-    const rawTextRes = rawTextUrl ? results[2] : null
-
-    // Check if responses are OK
-    if (!extractRes.ok || !extractRes.headers.get('content-type')?.includes('application/json')) {
-      const text = await extractRes.text()
-      console.error(`Wikipedia API error for extract (page ${pageId}):`, text.substring(0, 200))
-      throw new Error(`Wikipedia API returned non-JSON response for extract`)
-    }
-
-    if (rawTextRes && !rawTextRes.ok) {
-      const text = await rawTextRes.text()
-      console.error(`Wikipedia API error for raw text (page ${pageId}):`, text.substring(0, 200))
-      throw new Error(`Wikipedia API returned error for raw text`)
-    }
-
-    if (!categoriesRes.ok || !categoriesRes.headers.get('content-type')?.includes('application/json')) {
-      const text = await categoriesRes.text()
-      console.error(`Wikipedia API error for categories (page ${pageId}):`, text.substring(0, 200))
-      throw new Error(`Wikipedia API returned non-JSON response for categories`)
-    }
-
-    const extractData = await extractRes.json()
-    const rawText: string | null = rawTextRes ? await rawTextRes.text() : null
-    const categoriesData = await categoriesRes.json()
-
-    const page = extractData.query?.pages?.[pageId]
-    const categories = categoriesData.query?.pages?.[pageId]?.categories || []
-
-    // Use raw wikitext if available, otherwise fall back to extract
-    const fullText: string = rawText || ''
-    
-    // Debug logging for content inspection
-    if (fullText && fullText.length > 0) {
-      console.log(`[DEBUG fetchWikipediaPageData] Page ${pageId} (${title}) fullText length:`, fullText.length)
-      console.log(`[DEBUG fetchWikipediaPageData] Using raw wikitext:`, !!rawText)
-      // Check for common table indicators
-      console.log(`[DEBUG fetchWikipediaPageData] Contains "Episode":`, fullText.includes('Episode'))
-      console.log(`[DEBUG fetchWikipediaPageData] Contains "Season":`, fullText.includes('Season'))
-      console.log(`[DEBUG fetchWikipediaPageData] Contains "Broadcast Date":`, fullText.includes('Broadcast Date'))
-      console.log(`[DEBUG fetchWikipediaPageData] Contains "Tanner Hall":`, fullText.includes('Tanner Hall'))
-      console.log(`[DEBUG fetchWikipediaPageData] Contains "Chad's Gap":`, fullText.includes("Chad's Gap"))
-      console.log(`[DEBUG fetchWikipediaPageData] Contains "wikitable":`, fullText.includes('wikitable'))
-      // Sample a section that should contain Episode 17
-      const episode17Index = fullText.indexOf('Episode 17') || fullText.indexOf('|17')
-      if (episode17Index > 0) {
-        console.log(`[DEBUG fetchWikipediaPageData] Episode 17 section sample:`, fullText.substring(episode17Index, episode17Index + 2000))
-      }
-    } else {
-      console.warn(`[DEBUG fetchWikipediaPageData] Page ${pageId} (${title}) has NO fullText!`)
-    }
-
-    return {
-      extract: page?.extract || '',
-      fullText: fullText, // Full page text including tables (only if fullText=true)
-      categories: categories.map((c: any) => c.title.replace('Category:', '')),
-      title: title || '',
-    }
-  } catch (error: any) {
-    console.error(`Error fetching Wikipedia data for page ${pageId}:`, error)
-    return { extract: '', fullText: '', categories: [], title: '' }
-  }
-}
 
 export async function POST(request: NextRequest) {
   try {
@@ -280,133 +169,7 @@ export async function POST(request: NextRequest) {
       })
       .filter((p) => p !== null) as Array<{ page_id: number; title: string; extract: string; fullText: string; categories: string[] }>
 
-    // Step 4: Get link information tool
-    const getLinkDirectionTool = tool({
-      name: 'get_link_direction',
-      description: 'Get the direction of the link between two pages. Returns "inbound" if link goes from selected to center, "outbound" if from center to selected, or "bidirectional" if both directions exist.',
-      parameters: {
-        type: 'object',
-        properties: {
-          fromPageId: {
-            type: 'number',
-            description: 'The source page ID',
-          },
-          toPageId: {
-            type: 'number',
-            description: 'The target page ID',
-          },
-        },
-        required: ['fromPageId', 'toPageId'],
-        additionalProperties: false,
-      },
-      async execute({ fromPageId, toPageId }: { fromPageId: number; toPageId: number }) {
-        const { data } = await supabase
-          .from('links')
-          .select('from_page_id, to_page_id')
-          .or(`and(from_page_id.eq.${fromPageId},to_page_id.eq.${toPageId}),and(from_page_id.eq.${toPageId},to_page_id.eq.${fromPageId})`)
-        
-        const hasForward = data?.some((l: any) => l.from_page_id === fromPageId && l.to_page_id === toPageId)
-        const hasReverse = data?.some((l: any) => l.from_page_id === toPageId && l.to_page_id === fromPageId)
-        
-        if (hasForward && hasReverse) {
-          return JSON.stringify({ direction: 'bidirectional' })
-        } else if (hasReverse) {
-          return JSON.stringify({ direction: 'inbound', note: 'Link goes from target to source' })
-        } else if (hasForward) {
-          return JSON.stringify({ direction: 'outbound', note: 'Link goes from source to target' })
-        }
-        return JSON.stringify({ direction: 'none' })
-      },
-    })
-
-    // Step 5: Define tools
-    const fetchWikipediaPageDataTool = tool({
-      name: 'fetch_wikipedia_page_data',
-      description: 'Fetch full text extract and categories for a Wikipedia page by its page ID.',
-      parameters: {
-        type: 'object',
-        properties: {
-          pageId: {
-            type: 'number',
-            description: 'The Wikipedia page ID to fetch data for',
-          },
-        },
-        required: ['pageId'],
-        additionalProperties: false,
-      },
-      async execute({ pageId }: { pageId: number }) {
-        try {
-          const result = await fetchWikipediaPageData(pageId)
-          return JSON.stringify(result)
-        } catch (error: any) {
-          return JSON.stringify({ error: error.message, extract: '', fullText: '', categories: [], title: '' })
-        }
-      },
-    })
-
-    const getRelationshipEdgesTool = tool({
-      name: 'get_relationship_edges',
-      description: 'Get all edges (links) between a set of page IDs from the database.',
-      parameters: {
-        type: 'object',
-        properties: {
-          pageIds: {
-            type: 'array',
-            items: { type: 'number' },
-            description: 'Array of page IDs to get edges between',
-          },
-        },
-        required: ['pageIds'],
-        additionalProperties: false,
-      },
-      async execute({ pageIds }: { pageIds: number[] }) {
-        const { data } = await supabase
-          .from('links')
-          .select('from_page_id, to_page_id')
-          .in('from_page_id', pageIds)
-          .in('to_page_id', pageIds)
-
-        const edges = (data || []).map((e: any) => ({
-          from: e.from_page_id,
-          to: e.to_page_id,
-        }))
-        return JSON.stringify(edges)
-      },
-    })
-
-    const getPageDetailsTool = tool({
-      name: 'get_page_details',
-      description: 'Get basic page information (title, degrees) from the database for a set of page IDs.',
-      parameters: {
-        type: 'object',
-        properties: {
-          pageIds: {
-            type: 'array',
-            items: { type: 'number' },
-            description: 'Array of page IDs to get details for',
-          },
-        },
-        required: ['pageIds'],
-        additionalProperties: false,
-      },
-      async execute({ pageIds }: { pageIds: number[] }) {
-        const { data } = await supabase
-          .from('pages')
-          .select('page_id, title, out_degree, in_degree')
-          .in('page_id', pageIds)
-
-        const pages = (data || []).map((p: any) => ({
-          page_id: p.page_id,
-          title: p.title,
-          out_degree: p.out_degree,
-          in_degree: p.in_degree,
-          total_degree: (p.out_degree || 0) + (p.in_degree || 0),
-        }))
-        return JSON.stringify(pages)
-      },
-    })
-
-    // Step 6: Get page titles for context
+    // Step 5: Get page titles for context
     // Ensure pages_data is available
     if (!pages_data || pages_data.length === 0) {
       return NextResponse.json(
@@ -418,29 +181,7 @@ export async function POST(request: NextRequest) {
     const centerTitle = pages_data.find((p) => p.page_id === centerPageId)?.title || 'Unknown'
     const selectedTitle = pages_data.find((p) => p.page_id === selectedNodeId)?.title || 'Unknown'
 
-    // Step 7: Create agent
-    const agent = new Agent({
-      name: 'Wikipedia Relationship Analyzer',
-      instructions: `You are analyzing the DIRECT relationship between two Wikipedia pages. Your task is to find the explicit connection between them in their page content.
-
-CRITICAL INSTRUCTIONS:
-1. You have COMPLETE, UNTRUNCATED page content for BOTH pages. The full text includes ALL tables, lists, episode lists, sections, and every piece of content.
-2. The link direction tells you WHERE to look for the connection:
-   - If "inbound": The selected node ("${selectedTitle}") links TO the center node ("${centerTitle}"). Look in "${selectedTitle}"'s FULL content for mentions of "${centerTitle}".
-   - If "outbound": The center node ("${centerTitle}") links TO the selected node ("${selectedTitle}"). Look in "${centerTitle}"'s FULL content for mentions of "${selectedTitle}".
-   - If "bidirectional": Both pages link to each other. Check both.
-3. Search through EVERYTHING: tables, episode tables, lists, all sections, footnotes, references - the connection IS there in the full content.
-4. For episode tables or event lists: Look for entries that mention the other page's subject. The connection might be in a table row, list item, or structured data.
-5. Find the SPECIFIC mention or reference that creates the link. Quote the exact text or table entry.
-6. Structure your response EXACTLY as requested in the context.
-7. When searching for additional relationships in episode tables: You MUST read through EVERY single episode from Episode 1 to the last episode. Do not skip any. If searching for a location like "Park City, Utah" and you don't find it, you haven't searched thoroughly enough - it IS there, you must find it.
-
-IMPORTANT: The full page content is provided with NO truncation. If you don't see a connection, search more carefully through tables and structured data. The connection exists because there's a database link between these pages. When searching episode tables, read through ALL episodes systematically - do not stop early.`,
-      model: 'gpt-4o',
-      tools: [fetchWikipediaPageDataTool, getLinkDirectionTool, getPageDetailsTool],
-    })
-
-    // Step 8: Build initial context with actual page content
+    // Step 6: Build initial context with actual page content
     const centerPage = pages_data.find((p) => p.page_id === centerPageId)
     const selectedPage = pages_data.find((p) => p.page_id === selectedNodeId)
 
@@ -510,101 +251,17 @@ IMPORTANT: The full page content is provided with NO truncation. If you don't se
     console.log(`[DEBUG] Total pagesContext length: ${pagesContext.length} characters`)
     console.log(`[DEBUG] Context preview (first 500 chars):`, pagesContext.substring(0, 500))
 
-    // Link direction context
-    let linkContext = `LINK DIRECTION: ${linkDirection}\n`
-    if (linkDirection === 'inbound') {
-      linkContext += `The link goes FROM "${selectedPage.title}" TO "${centerPage.title}" (inbound to center).\n`
-      linkContext += `This means "${selectedPage.title}" links to "${centerPage.title}" in its content.\n`
-    } else if (linkDirection === 'outbound') {
-      linkContext += `The link goes FROM "${centerPage.title}" TO "${selectedPage.title}" (outbound from center).\n`
-      linkContext += `This means "${centerPage.title}" links to "${selectedPage.title}" in its content.\n`
-    } else {
-      linkContext += `The link is bidirectional - both pages link to each other.\n`
-    }
-
-    let contextText = `You are analyzing the DIRECT relationship between two Wikipedia pages:
-- Key Node (Center): "${centerTitle}" (page ID: ${centerPageId})
-- Selected Node: "${selectedTitle}" (page ID: ${selectedNodeId})
-
-${linkContext}
-
-${pagesContext}
-
-YOUR TASK: Find the EXPLICIT connection between these two pages in their content. The connection EXISTS because there's a database link. Search thoroughly:
-
-- The link direction is: ${linkDirection}
-- If inbound: Search "${selectedTitle}"'s COMPLETE content (including ALL tables) for "${centerTitle}"
-- If outbound: Search "${centerTitle}"'s COMPLETE content (including ALL tables) for "${selectedTitle}"
-- Look in episode tables, event lists, notable events sections, and ALL structured data
-- The full page content is provided with NO truncation - search everything
-
-ADDITIONAL RELATIONSHIPS:
-${additionalRelationships.length > 0 
-  ? `The following ${additionalRelationships.length} page(s) are first-degree relationships of BOTH "${centerTitle}" and "${selectedTitle}" (they connect to both pages):
-${additionalRelationships.map(r => `- ${r.title} (page ID: ${r.page_id})`).join('\n')}
-
-The FULL page content (raw wikitext) for each of these additional relationship pages is provided below. 
-
-CRITICAL: To find how each additional relationship page connects to both "${centerTitle}" and "${selectedTitle}", you must:
-
-1. Search "${centerTitle}"'s COMPLETE page content (including ALL episodes, tables, lists, and sections) for explicit mentions of the additional relationship page. Search EVERY episode, not just the first one you find.
-
-2. Search "${selectedTitle}"'s COMPLETE page content (including ALL episodes, tables, lists, and sections) for explicit mentions of the additional relationship page. Search EVERY episode, not just the first one you find.
-
-3. Check the additional relationship page's content for explicit mentions of "${centerTitle}" or "${selectedTitle}"
-
-IMPORTANT: When searching episode tables or lists:
-- The page content is in Wikipedia wikitext format. Episode tables use wikitext table syntax:
-  - Tables start with "{|" and end with "|}"
-  - Rows are separated by "|-"
-  - Table cells use "|" for data and "!" for headers
-  - Episode numbers appear in cells like "|26" or "|-\n|26"
-  - Episode descriptions are in list format with "#" bullets within table rows
-- You MUST read through ALL episodes systematically from Episode 1 to the last episode. Do not skip any episodes.
-- Look for the additional relationship page name in EVERY single episode description. Search for both "[[Page Name]]" (wikitext link format) and "Page Name" (plain text).
-- When searching for any location, person, or entity name, check ALL episodes - mentions can appear in any episode, not just early ones.
-- If you don't find a mention after searching all episodes, go back and check EVERY episode again more carefully, paying attention to the wikitext table structure. The mention may be in a later episode.
-- Cite the specific episode number, broadcast date, and description where the connection appears (e.g., "Episode 26, August 8, 2008: [Page Name] (Date) - description text")
-
-For example, if "${centerTitle}"'s page mentions a location and "${selectedTitle}"'s page also mentions that same location in ANY episode, then that location connects to both. You must find and cite ALL mentions, not just the first one.
-
-Only report connections that you can explicitly see in the raw page content - cite the specific episode number, table entry, text, or section where the connection appears.`
-  : 'No additional relationships found (no pages are first-degree connections of both the center and selected nodes).'
-}
-
-STRUCTURE YOUR RESPONSE EXACTLY AS FOLLOWS:
-
-**${selectedTitle}**
-- Key details about this page (2-3 sentences)
-- Notable facts, categories, or context
-
-**${centerTitle}**
-- Key details about this page (2-3 sentences)
-- Notable facts, categories, or context
-
-**Primary Relationship**
-- Explicit connection found in the page content
-- Specific details about how they're related (mention tables, sections, or specific text where the connection appears)
-- Additional context or color about the relationship
-
-${additionalRelationships.length > 0 ? `**Additional Relationships**
-
-First, provide a bulleted list with one sentence description for each additional relationship page:
-
-${additionalRelationships.map(r => `- **${r.title}**: [One sentence describing how this page explicitly connects to both "${centerTitle}" and "${selectedTitle}". You MUST cite specific mentions with episode numbers or section names: e.g., "${centerTitle}'s page mentions ${r.title} in [specific section]" and "${selectedTitle}'s page mentions ${r.title} in Episode X (Date) about [description]".]`).join('\n')}
-
-For each additional relationship, you MUST:
-- Search "${centerTitle}"'s COMPLETE page content (ALL tables, ALL sections) for explicit mentions of the additional relationship page. Cite the specific episode number, section, or text where it appears.
-- Search "${selectedTitle}"'s COMPLETE page content (ALL tables, ALL sections) for explicit mentions of the additional relationship page. You must check EVERY episode in the episode table, not just the first few. Cite the specific episode number, broadcast date, and description (e.g., "Episode X, Date: [Page Name] - description").
-- Check if the additional relationship page explicitly mentions "${centerTitle}" or "${selectedTitle}"
-
-CRITICAL: When searching episode tables, you must read through ALL episodes systematically from the first episode to the last. Do not skip any episodes. Do not stop after finding one mention - there may be multiple episodes that mention the same location or person. 
-
-VERY IMPORTANT: If you claim that a page is not mentioned in "${selectedTitle}"'s episode table, you must have searched through EVERY single episode from Episode 1 to the final episode. If you haven't checked all episodes, you cannot conclude that a mention doesn't exist. Go through the episode table line by line, checking every single episode description before concluding that a mention is absent.
-
-CRITICAL: Only report on EXPLICIT connections that you can see in the raw page content provided. Cite specific text, table entries, or sections. Do not infer, assume, or speculate about connections that aren't explicitly stated in the page text, tables, or structured data. Do NOT provide narrative paragraphs summarizing the relationships - only the bulleted list is needed.` : ''}
-
-Be specific and reference actual content from the pages. Look in tables, lists, and all sections of the full page content.`
+    // Step 7: Create agent and build context
+    const agent = createRelationshipAnalyzerAgent(centerTitle, selectedTitle, additionalRelationships)
+    const contextText = buildAgentContext(
+      centerPageId,
+      selectedNodeId,
+      centerTitle,
+      selectedTitle,
+      linkDirection,
+      pagesContext,
+      additionalRelationships
+    )
 
     // Step 8: Build input
     let input: string
@@ -615,7 +272,7 @@ Be specific and reference actual content from the pages. Look in tables, lists, 
       input = contextText
     }
 
-    // Step 10: Run the agent
+    // Step 9: Run the agent
     const result = await run(agent, input)
 
     // Debug: Log key properties
