@@ -1,12 +1,12 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, Suspense } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { Switch } from '@headlessui/react'
 import GraphVisualization from '@/components/GraphVisualization'
 import { fetchEgoGraph, fetchAllGraph, fetchNodeConnections, searchPages } from '@/lib/api'
 
-export default function Home() {
+function HomeContent() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const [graphData, setGraphData] = useState<any>(null)
@@ -557,6 +557,14 @@ export default function Home() {
         )
       })()}
     </main>
+  )
+}
+
+export default function Home() {
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center h-screen">Loading...</div>}>
+      <HomeContent />
+    </Suspense>
   )
 }
 
