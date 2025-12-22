@@ -52,6 +52,7 @@ function AutoRotatingOrbitControls({
   // Fit camera to view all nodes on first load (only when shouldRefit is true)
   useEffect(() => {
     if (!shouldRefit || hasFittedRef.current || nodePositions.size === 0) return
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     
     // Use a small delay to ensure controls are initialized
     const timeout = setTimeout(() => {

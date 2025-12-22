@@ -397,7 +397,7 @@ export default function Home() {
         
         // Build relationship list with type information
         const relationships = Array.from(connectedNodeIds).map((connectedId: number) => {
-          const connectedNode = nodeMap.get(connectedId)
+          const connectedNode = nodeMap.get(connectedId) as { title?: string } | undefined
           const hasOutbound = edges.some((e: any) => e.from === nodeId && e.to === connectedId)
           const hasInbound = edges.some((e: any) => e.to === nodeId && e.from === connectedId)
           
