@@ -45,6 +45,7 @@ This document outlines the plan to implement a progressive discovery caching lay
 1. **Token Overages**: When analyzing large clusters (many additional relationships), sending all full page content exceeds token limits (30k TPM)
 2. **Redundant Work**: Same edges are analyzed repeatedly across different user sessions
 3. **No Caching**: Every analysis requires full LLM call, even for previously analyzed relationships
+4. **Memory Inefficiency**: All page content kept in memory for entire analysis, even after relationships are found
 
 ## Proposed Changes
 
@@ -65,6 +66,7 @@ This document outlines the plan to implement a progressive discovery caching lay
 2. **Progressive Generation**: Check cache first, only generate what's missing
 3. **Individual Edge Caching**: Each edge analyzed once, cached, and reused
 4. **Token Control**: Each LLM call only processes 2 pages (from + to)
+5. **Memory Efficiency**: Flush page content from memory once all edges involving that page are analyzed
 
 ## Database Schema Changes
 
@@ -88,11 +90,11 @@ CREATE TABLE wiki_edge_summaries (
   to_revision text NULL,
   
   -- Analysis results
-  found boolean NOT NULL DEFAULT true,
+  found boolean NOT NULL DEFAULT true,  -- Relationship either exists (explicitly referenced) or doesn't - deterministic
   summary text NOT NULL,  -- Main relationship summary (1-3 sentences)
   evidence jsonb NOT NULL,  -- { quotes: string[], locations: string[] }
   relationship_type text NULL,  -- 'featured_in' | 'born_in' | 'located_in' | etc.
-  confidence real NOT NULL DEFAULT 0.7,  -- 0.0 to 1.0
+  -- Note: No confidence field needed - relationships are deterministic (explicitly referenced or not)
   
   -- Status tracking
   status text NOT NULL DEFAULT 'ready',  -- 'ready' | 'pending' | 'error'
@@ -154,7 +156,9 @@ Create: `frontend/app/api/graph/analyze-relationships/cache.ts`
 Create: `frontend/app/api/graph/analyze-relationships/edge-analyzer.ts`
 
 **Functions:**
-- `analyzeEdge(fromPageId, toPageId, direction, fromTitle, toTitle)` - Analyze single edge
+- `analyzeEdge(fromPageId, toPageId, direction, fromTitle, toTitle, fromPageContent, toPageContent)` - Analyze single edge
+  - Takes page content as parameters (fetched on-demand or passed from cache)
+  - Returns structured analysis result
 - `parseAnalysisOutput(llmResponse)` - Parse agent output into structured format
 - `formatEdgeSummary(analysisData)` - Format for caching
 
@@ -163,14 +167,20 @@ The agent should return structured JSON for edge analyses:
 
 ```json
 {
-  "found": true,
+  "found": true,  // Boolean: relationship either exists (explicitly referenced) or doesn't - deterministic
   "relationship_summary": "1-3 sentence summary",
   "evidence_quotes": ["short exact quote", "..."],
   "evidence_locations": ["section name / table name", "..."],
-  "relationship_type": "featured_in|born_in|located_in|episode_about|other",
-  "confidence": 0.0-1.0
+  "relationship_type": "featured_in|born_in|located_in|episode_about|other"
 }
 ```
+
+**Deterministic Relationships:**
+Since we only report explicit connections found in raw page content, relationships are binary:
+- **`found: true`**: Explicit reference exists in the page content (tables, text, sections)
+- **`found: false`**: No explicit reference found (shouldn't happen if we're only analyzing edges that exist in the database)
+
+The agent should only report relationships that are explicitly stated in the page content. If a relationship exists in the database but isn't explicitly referenced in the content, it should be marked as `found: false` (though this case should be rare since we're analyzing edges that exist in the database).
 
 **Note**: For the primary relationship (center ↔ selected), we may want to keep the rich markdown format. For additional relationships, we'll use the structured JSON format.
 
@@ -190,10 +200,15 @@ Modify: `frontend/app/api/graph/analyze-relationships/route.ts`
    - Query cache for all required edges
    - Separate into: cached (ready), missing, expired
 
-3. **Progressive generation:**
-   - Use cached results immediately
-   - Generate missing/expired edges with concurrency cap (2-4 at a time)
-   - Store new results in cache
+3. **Progressive generation with memory management:**
+   - **Page content fetching**: Fetch page content on-demand (or batch fetch at start)
+   - **Reference counting**: Track how many pending analyses need each page
+     - `center` page: needed for primary + all `additional ↔ center` edges
+     - `selected` page: needed for primary + all `additional ↔ selected` edges
+     - Each `additional` page: needed for 2 edges (with center and selected)
+   - **Memory flushing**: Once all edges involving a page are analyzed, flush that page's content from memory
+   - **Concurrency**: Generate missing/expired edges with concurrency cap (2-4 at a time)
+   - **Caching**: Store new results in cache immediately after each edge analysis
 
 4. **Combine results:**
    - Primary relationship: Use cached or generate (rich markdown)
@@ -201,6 +216,12 @@ Modify: `frontend/app/api/graph/analyze-relationships/route.ts`
 
 5. **Return same format:**
    - Preserve exact output structure user sees now
+
+**Memory Optimization:**
+- Each edge analysis only needs 2 pages in memory at a time
+- Once a page's reference count hits 0 (all edges analyzed), flush it from memory
+- This prevents keeping large page content in memory unnecessarily
+- Example: If `center` is needed for 5 edges, keep it until all 5 are done, then flush
 
 ### Phase 5: Agent Updates
 
@@ -275,6 +296,39 @@ The difference is:
 - **Concurrency cap**: Generate 2-4 edges simultaneously
 - **Max edges per request**: Limit to prevent token overages (e.g., 10 edges max per request)
 
+### Memory Management Strategy
+
+**Token Usage:**
+- Each edge analysis sends 2 pages to the LLM (from + to)
+- Total tokens per edge: ~2 × (page content size in tokens)
+- With caching: Only analyze each edge once, then reuse cached results
+- **Yes, token counts will go up** for deterministic evidence gathering (we need full page content to find explicit references)
+- **But**: This is acceptable because:
+  1. Each individual call is much smaller than sending all pages at once
+  2. With caching, we only pay this cost once per edge
+  3. Over time, most edges will be cached, dramatically reducing token usage
+
+**Page Content Flushing:**
+- **Reference counting**: Track how many pending analyses need each page
+  - `center` page: needed for primary edge + all `additional ↔ center` edges
+  - `selected` page: needed for primary edge + all `additional ↔ selected` edges  
+  - Each `additional` page: needed for 2 edges (with center and selected)
+- **Flush strategy**: Once a page's reference count hits 0 (all edges analyzed), immediately flush that page's content from memory
+- **Implementation**: 
+  - Keep page content in a Map with reference counts
+  - Decrement count after each edge analysis completes
+  - When count reaches 0, delete from Map
+  - This prevents keeping large page content in memory unnecessarily
+
+**Example:**
+- Analyzing 5 additional relationships = 11 total edges (1 primary + 10 additional)
+- `center` page: needed for 6 edges (1 primary + 5 additional)
+- `selected` page: needed for 6 edges (1 primary + 5 additional)
+- Each `additional` page: needed for 2 edges
+- After analyzing all `additional1 ↔ center` and `additional1 ↔ selected`, flush `additional1` page content
+- After analyzing all edges involving `center`, flush `center` page content
+- Memory footprint: Only pages actively being analyzed are kept in memory
+
 ## Migration Path
 
 ### Step 1: Database Migration
@@ -311,7 +365,7 @@ The difference is:
 2. **Background job**: Pre-generate popular edges
 3. **Session cache**: Short-term cache for current session
 4. **Evidence viewer**: UI to show quotes and locations
-5. **Confidence filtering**: Hide low-confidence relationships
+5. **Evidence filtering**: Hide relationships with weak evidence (few quotes, indirect mentions)
 6. **Revision tracking**: Automatic cache invalidation on page updates
 
 ## Relationship Importance Ranking (Future Enhancement)
@@ -374,10 +428,11 @@ When analyzing relationships, we may discover many "additional relationships" (n
 - **Cons**: Requires content analysis
 
 **Evidence Strength:**
-- From edge analysis: confidence score, number of evidence quotes
-- Higher confidence + more evidence = more important
-- **Pros**: Uses our own analysis data
+- From edge analysis: number of evidence quotes, relationship type, prominence of mentions
+- More evidence quotes + more prominent mentions = more important
+- **Pros**: Uses our own analysis data, reflects strength of the relationship
 - **Cons**: Only available after analysis
+- **Note**: Since relationships are deterministic (explicitly referenced or not), we use evidence quantity and prominence for ranking, not confidence scores
 
 #### 3. **LLM-Based Scoring** (Most Accurate, Higher Cost)
 
@@ -426,8 +481,8 @@ importanceScore = (
    - Low cost, uses existing data
 
 3. **Phase 3: Evidence-Based** (add with edge analyzer)
-   - Use `confidence` and `evidence_quotes.length` from `wiki_edge_summaries`
-   - Higher confidence + more evidence = higher importance
+   - Use `evidence_quotes.length` and relationship type from `wiki_edge_summaries`
+   - More evidence quotes + more prominent relationship types = higher importance
    - Zero additional cost (uses cached data)
 
 4. **Phase 4: LLM Scoring** (optional enhancement)
@@ -452,7 +507,7 @@ CREATE INDEX wiki_edge_summaries_importance_idx ON wiki_edge_summaries (importan
 
 **Methods:**
 - `'graph'` - Degree centrality only (fastest)
-- `'evidence'` - Confidence + evidence count (fast, uses cache)
+- `'evidence'` - Evidence count + relationship type (fast, uses cache)
 - `'hybrid'` - Combined graph + evidence + content (balanced)
 - `'semantic'` - LLM-based scoring (most accurate, slower)
 
@@ -483,7 +538,7 @@ CREATE INDEX wiki_edge_summaries_importance_idx ON wiki_edge_summaries (importan
 **Start with Hybrid Approach (Graph + Evidence):**
 
 1. **Immediate**: Use degree centrality for initial ranking
-2. **After caching**: Add evidence-based scoring (confidence + quote count)
+2. **After caching**: Add evidence-based scoring (evidence quote count + relationship type)
 3. **Future enhancement**: Add optional LLM importance scoring for top relationships
 
 This gives good results with minimal cost, and can be enhanced later.
